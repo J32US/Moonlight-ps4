@@ -19,7 +19,7 @@ OK criteria: `present_mode=BGRA`, `RegisterBuffers => 0`, first AU `NAL types=[7
 
 ## 1. Packaging and install (YCbCr)
 
-1. Build app: `cmake --build build-ps4` → `Moonlight-0.8.17.pkg`
+1. Build app: `cmake --build build-ps4` → `Moonlight-1.0.0.pkg`
 2. Confirm `CATEGORY=gd` in the `.pkg` (GoldHEN does **not** inject plugins with `gde`)
 3. Install `plugin/bin/ycbcr_unlock.prx` → `/data/GoldHEN/plugins/`
 4. `/data/GoldHEN/plugins.ini`:

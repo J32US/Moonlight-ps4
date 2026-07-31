@@ -6,7 +6,7 @@ game-streaming client) for jailbroken PS4 (GoldHEN), built on the
 
 Full port plan: [PLAN.md](PLAN.md).
 
-**Current version: 0.8.17**
+**Current version: 1.0.0**
 
 ## Status
 
@@ -81,7 +81,7 @@ scripts/build_pkg.sh
 cmake -B build-host -G Ninja && cmake --build build-host
 ```
 
-Installable artifact: `build-ps4/Moonlight-0.8.17.pkg`
+Installable artifact: `build-ps4/Moonlight-1.0.0.pkg`
 (also `IV0000-MLNT00001_00-MOONLIGHTPS40000.pkg`).
 
 `build_pkg.sh` runs `source scripts/env.sh` itself. Manual CMake equivalent:

@@ -5,7 +5,7 @@ upstream `moonlight-common-c` and the OpenOrbis toolchain, with the video decode
 abstract interface: FFmpeg software decode to validate the full stack, and `libSceVideodec2`
 hardware decode as the stretch goal.
 
-**Current version: 0.8.17** (as of 2026-07-31).
+**Current version: 1.0.0** (as of 2026-07-31).
 
 ## Realistic goal
 
@@ -290,7 +290,7 @@ real loss.
 
 
 
-## Tracking (0.8.17, 2026-07-31)
+## Tracking (1.0.0, 2026-07-31)
 
 
 
