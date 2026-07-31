@@ -1,0 +1,289 @@
+diff --git a/src/AudioStream.c b/src/AudioStream.c
+index 2fcc1f0..5a20ffb 100644
+--- a/src/AudioStream.c
++++ b/src/AudioStream.c
+@@ -93,7 +93,7 @@ int notifyAudioPortNegotiationComplete(void) {
+ 
+     // For GFE 3.22 compatibility, we must start the audio ping thread before the RTSP handshake.
+     // It will not reply to our RTSP PLAY request until the audio ping has been received.
+-    rtpSocket = bindUdpSocket(RemoteAddr.ss_family, &LocalAddr, AddrLen, 0, SOCK_QOS_TYPE_AUDIO);
++    rtpSocket = bindUdpSocket(LC_ADDR_FAMILY(&RemoteAddr), &LocalAddr, AddrLen, 0, SOCK_QOS_TYPE_AUDIO);
+     if (rtpSocket == INVALID_SOCKET) {
+         return LastSocketFail();
+     }
+diff --git a/src/Connection.c b/src/Connection.c
+index bac9a6e..f32336d 100644
+--- a/src/Connection.c
++++ b/src/Connection.c
+@@ -364,6 +364,16 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
+         // TCP 48010 is a last resort because:
+         // a) it's not always listening and there's a race between listen() on the host and our connect()
+         // b) it's not used at all by certain host versions which perform RTSP over ENet
++#if defined(__ORBIS__) || defined(__PS4__) || defined(__OPENORBIS__)
++        // IPv4-only on PS4 (no IPv6 / problematic AF_UNSPEC).
++        err = resolveHostName(serverInfo->address, AF_INET, 47984, &RemoteAddr, &AddrLen);
++        if (err != 0) {
++            err = resolveHostName(serverInfo->address, AF_INET, 47989, &RemoteAddr, &AddrLen);
++        }
++        if (err != 0) {
++            err = resolveHostName(serverInfo->address, AF_INET, 48010, &RemoteAddr, &AddrLen);
++        }
++#else
+         err = resolveHostName(serverInfo->address, AF_UNSPEC, 47984, &RemoteAddr, &AddrLen);
+         if (err != 0) {
+             err = resolveHostName(serverInfo->address, AF_UNSPEC, 47989, &RemoteAddr, &AddrLen);
+@@ -371,6 +381,7 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
+         if (err != 0) {
+             err = resolveHostName(serverInfo->address, AF_UNSPEC, 48010, &RemoteAddr, &AddrLen);
+         }
++#endif
+     }
+     if (err != 0) {
+         Limelog("failed: %d\n", err);
+@@ -409,7 +420,7 @@ int LiStartConnection(PSERVER_INFORMATION serverInfo, PSTREAM_CONFIGURATION stre
+         else {
+             StreamConfig.streamingRemotely = STREAM_CFG_REMOTE;
+ 
+-            if (RemoteAddr.ss_family == AF_INET || isNat64) {
++            if (LC_ADDR_FAMILY(&RemoteAddr) == AF_INET || isNat64) {
+                 // Cap packet size at 1024 for remote IPv4 streaming to avoid fragmentation.
+                 Limelog("Packet size capped at 1024 bytes for remote IPv4 streaming\n");
+                 StreamConfig.packetSize = 1024;
+diff --git a/src/ConnectionTester.c b/src/ConnectionTester.c
+index d993834..d562b79 100644
+--- a/src/ConnectionTester.c
++++ b/src/ConnectionTester.c
+@@ -140,7 +140,7 @@ unsigned int LiTestClientConnectivity(const char* testServer, unsigned short ref
+ 
+     for (i = 0; i < PORT_FLAGS_MAX_COUNT; i++) {
+         if (testPortFlags & (1U << i)) {
+-            sockets[i] = createSocket(address.ss_family,
++            sockets[i] = createSocket(LC_ADDR_FAMILY(&address),
+                                       LiGetProtocolFromPortFlagIndex(i) == IPPROTO_UDP ? SOCK_DGRAM : SOCK_STREAM,
+                                       LiGetProtocolFromPortFlagIndex(i),
+                                       true);
+diff --git a/src/ControlStream.c b/src/ControlStream.c
+index 2b5182e..e107910 100644
+--- a/src/ControlStream.c
++++ b/src/ControlStream.c
+@@ -1768,10 +1768,19 @@ int startControlStream(void) {
+         enet_address_set_port(&remoteAddress, ControlPortNumber);
+ 
+         // Create a client
+-        client = enet_host_create(RemoteAddr.ss_family,
+-                                  LocalAddr.ss_family != 0 ? &localAddress : NULL,
++#if defined(__ORBIS__) || defined(__PS4__) || defined(__OPENORBIS__)
++        // Avoid binding LocalAddr: Orbis sockaddr layout breaks ENet bind.
++        // NULL = client without explicit bind (wildcard).
++        client = enet_host_create(LC_ADDR_FAMILY(&RemoteAddr), NULL,
+                                   1, CTRL_CHANNEL_COUNT, 0, 0);
++#else
++        client = enet_host_create(LC_ADDR_FAMILY(&RemoteAddr),
++                                  LC_ADDR_FAMILY(&LocalAddr) != 0 ? &localAddress : NULL,
++                                  1, CTRL_CHANNEL_COUNT, 0, 0);
++#endif
+         if (client == NULL) {
++            Limelog("enet_host_create failed (af=%d errno=%d)\n",
++                    LC_ADDR_FAMILY(&RemoteAddr), (int)LastSocketError());
+             stopping = true;
+             return -1;
+         }
+diff --git a/src/PlatformSockets.c b/src/PlatformSockets.c
+index cec96f3..00942fe 100644
+--- a/src/PlatformSockets.c
++++ b/src/PlatformSockets.c
+@@ -45,9 +45,9 @@ void addrToUrlSafeString(struct sockaddr_storage* addr, char* string, size_t str
+     char addrstr[URLSAFESTRING_LEN];
+ 
+ #ifdef AF_INET6
+-    if (addr->ss_family == AF_INET6) {
++    if (LC_ADDR_FAMILY(addr) == AF_INET6) {
+         struct sockaddr_in6* sin6 = (struct sockaddr_in6*)addr;
+-        inet_ntop(addr->ss_family, &sin6->sin6_addr, addrstr, sizeof(addrstr));
++        inet_ntop(LC_ADDR_FAMILY(addr), &sin6->sin6_addr, addrstr, sizeof(addrstr));
+ 
+         // IPv6 addresses need to be enclosed in brackets for URLs
+         snprintf(string, stringLength, "[%s]", addrstr);
+@@ -56,7 +56,7 @@ void addrToUrlSafeString(struct sockaddr_storage* addr, char* string, size_t str
+ #endif
+     {
+         struct sockaddr_in* sin = (struct sockaddr_in*)addr;
+-        inet_ntop(addr->ss_family, &sin->sin_addr, addrstr, sizeof(addrstr));
++        inet_ntop(LC_ADDR_FAMILY(addr), &sin->sin_addr, addrstr, sizeof(addrstr));
+ 
+         // IPv4 addresses are returned without changes
+         snprintf(string, stringLength, "%s", addrstr);
+@@ -299,7 +299,7 @@ SOCKET bindUdpSocket(int addressFamily, struct sockaddr_storage* localAddr, SOCK
+     }
+ 
+     // Use localAddr to bind if it was provided
+-    if (localAddr && localAddr->ss_family != 0) {
++    if (localAddr && LC_ADDR_FAMILY(localAddr) != 0) {
+         memcpy(&bindAddr, localAddr, addrLen);
+         SET_PORT(&bindAddr, 0);
+     }
+@@ -427,7 +427,17 @@ int setSocketNonBlocking(SOCKET s, bool enabled) {
+ SOCKET createSocket(int addressFamily, int socketType, int protocol, bool nonBlocking) {
+     SOCKET s;
+ 
++#if defined(__ORBIS__) || defined(__PS4__) || defined(__OPENORBIS__)
++    // On Orbis, IPPROTO_UDP (17) sometimes returns EPROTONOSUPPORT; protocol 0 works.
++    if (socketType == SOCK_DGRAM && protocol == IPPROTO_UDP)
++        s = socket(addressFamily, socketType, 0);
++    else
++        s = socket(addressFamily, socketType, protocol);
++    if (s == INVALID_SOCKET && protocol != 0)
++        s = socket(addressFamily, socketType, protocol);
++#else
+     s = socket(addressFamily, socketType, protocol);
++#endif
+     if (s == INVALID_SOCKET) {
+         Limelog("socket() failed: %d\n", (int)LastSocketError());
+         return INVALID_SOCKET;
+@@ -455,7 +465,7 @@ SOCKET connectTcpSocket(struct sockaddr_storage* dstaddr, SOCKADDR_LEN addrlen,
+     int err;
+ 
+     // Create a non-blocking TCP socket
+-    s = createSocket(dstaddr->ss_family, SOCK_STREAM, IPPROTO_TCP, true);
++    s = createSocket(LC_ADDR_FAMILY(dstaddr), SOCK_STREAM, IPPROTO_TCP, true);
+     if (s == INVALID_SOCKET) {
+         return INVALID_SOCKET;
+     }
+@@ -475,7 +485,7 @@ SOCKET connectTcpSocket(struct sockaddr_storage* dstaddr, SOCKADDR_LEN addrlen,
+ 
+     // Windows doesn't support setting TCP_MAXSEG but IP_PMTUDISC_DONT forces the MSS to the protocol
+     // minimum which is what we want here. Linux doesn't do this (disabling PMTUD just avoids setting DF).
+-    if (dstaddr->ss_family == AF_INET) {
++    if (LC_ADDR_FAMILY(dstaddr) == AF_INET) {
+         int val = IP_PMTUDISC_DONT;
+         if (setsockopt(s, IPPROTO_IP, IP_MTU_DISCOVER, (char*)&val, sizeof(val)) < 0) {
+             Limelog("setsockopt(IP_MTU_DISCOVER, IP_PMTUDISC_DONT) failed: %d\n", val, (int)LastSocketError());
+@@ -497,7 +507,7 @@ SOCKET connectTcpSocket(struct sockaddr_storage* dstaddr, SOCKADDR_LEN addrlen,
+         Limelog("setsockopt(TCP_NOOPT, %d) failed: %d\n", val, (int)LastSocketError());
+     }
+ #elif defined(TCP_MAXSEG)
+-    int val = dstaddr->ss_family == AF_INET ? TCPv4_MSS : TCPv6_MSS;
++    int val = LC_ADDR_FAMILY(dstaddr) == AF_INET ? TCPv4_MSS : TCPv6_MSS;
+ 
+     if (setsockopt(s, IPPROTO_TCP, TCP_MAXSEG, (char*)&val, sizeof(val)) < 0) {
+         Limelog("setsockopt(TCP_MAXSEG, %d) failed: %d\n", val, (int)LastSocketError());
+@@ -577,7 +587,9 @@ int getLocalAddressByUdpConnect(const struct sockaddr_storage* targetAddr, SOCKA
+ 
+     LC_ASSERT(targetPort != 0);
+ 
+-    udpSocket = createSocket(targetAddr->ss_family, SOCK_DGRAM, IPPROTO_UDP, false);
++    Limelog("getLocalAddressByUdpConnect: family=%d (ss_family raw=%d)\n",
++            LC_ADDR_FAMILY(targetAddr), (int)targetAddr->ss_family);
++    udpSocket = createSocket(LC_ADDR_FAMILY(targetAddr), SOCK_DGRAM, IPPROTO_UDP, false);
+     if (udpSocket == INVALID_SOCKET) {
+         return LastSocketError();
+     }
+@@ -763,11 +775,11 @@ bool isInSubnetV6(struct sockaddr_in6* sin6, unsigned char* subnet, int prefixLe
+ #endif
+ 
+ bool isPrivateNetworkAddress(struct sockaddr_storage* address) {
+-    if (address->ss_family == AF_INET) {
++    if (LC_ADDR_FAMILY(address) == AF_INET) {
+         return isPrivateNetworkAddressV4((struct sockaddr_in*)address, false);
+     }
+ #ifdef AF_INET6
+-    else if (address->ss_family == AF_INET6) {
++    else if (LC_ADDR_FAMILY(address) == AF_INET6) {
+         struct sockaddr_in6* sin6 = (struct sockaddr_in6*)address;
+         static unsigned char linkLocalPrefix[] = {0xfe, 0x80};
+         static unsigned char siteLocalPrefix[] = {0xfe, 0xc0};
+@@ -793,7 +805,7 @@ bool isPrivateNetworkAddress(struct sockaddr_storage* address) {
+ 
+ bool isNat64SynthesizedAddress(struct sockaddr_storage* address) {
+ #ifdef AF_INET6
+-    if (address->ss_family == AF_INET6) {
++    if (LC_ADDR_FAMILY(address) == AF_INET6) {
+         struct sockaddr_in6* sin6 = (struct sockaddr_in6*)address;
+         struct addrinfo hints, *res, *currentAddr;
+         int err;
+diff --git a/src/PlatformSockets.h b/src/PlatformSockets.h
+index 4bac8bd..1e95744 100644
+--- a/src/PlatformSockets.h
++++ b/src/PlatformSockets.h
+@@ -18,6 +18,12 @@ extern in_port_t n3ds_udp_port;
+ #endif
+ #endif
+ 
++#if defined(__ORBIS__) || defined(__PS4__) || defined(__OPENORBIS__)
++#ifdef AF_INET6
++#undef AF_INET6
++#endif
++#endif
++
+ #if defined(_WIN32) && !defined(NXDK)
+ #define WIN32_LEAN_AND_MEAN
+ #include <windows.h>
+@@ -96,6 +102,29 @@ typedef ssize_t SOCK_RET;
+ typedef socklen_t SOCKADDR_LEN;
+ #endif
+ 
++#if defined(__ORBIS__) || defined(__PS4__) || defined(__OPENORBIS__)
++// OpenOrbis musl: sockaddr_in is BSD layout (sin_len@0, sin_family@1) but
++// sockaddr_storage.ss_family is at offset 0 (Linux-style). After getaddrinfo/
++// getsockname, reading ss_family returns the length (16) and socket(16,...) fails
++// with EPROTONOSUPPORT (43). Always use LC_ADDR_FAMILY.
++#include <stdint.h>
++static inline int lcAddrFamily(const struct sockaddr_storage* addr) {
++    const uint8_t* b = (const uint8_t*)addr;
++    if (b[1] == AF_INET)
++        return AF_INET;
++#ifdef AF_INET6
++    if (b[1] == AF_INET6)
++        return AF_INET6;
++#endif
++    if (addr->ss_family == AF_INET)
++        return AF_INET;
++    return b[1] ? (int)b[1] : (int)addr->ss_family;
++}
++#define LC_ADDR_FAMILY(addr) lcAddrFamily((const struct sockaddr_storage*)(addr))
++#else
++#define LC_ADDR_FAMILY(addr) ((addr)->ss_family)
++#endif
++
+ #ifdef AF_INET6
+ typedef struct sockaddr_in6 LC_SOCKADDR;
+ #define SET_FAMILY(addr, family) ((addr)->sin6_family = (family))
+diff --git a/src/RtspConnection.c b/src/RtspConnection.c
+index e958101..5a1e273 100644
+--- a/src/RtspConnection.c
++++ b/src/RtspConnection.c
+@@ -1016,7 +1016,7 @@ int performRtspHandshake(PSERVER_INFORMATION serverInfo) {
+         enet_address_set_port(&address, RtspPortNumber);
+ 
+         // Create a client that can use 1 outgoing connection and 1 channel
+-        client = enet_host_create(RemoteAddr.ss_family, NULL, 1, 1, 0, 0);
++        client = enet_host_create(LC_ADDR_FAMILY(&RemoteAddr), NULL, 1, 1, 0, 0);
+         if (client == NULL) {
+             return -1;
+         }
+diff --git a/src/SdpGenerator.c b/src/SdpGenerator.c
+index 22467c0..91351a7 100644
+--- a/src/SdpGenerator.c
++++ b/src/SdpGenerator.c
+@@ -550,7 +550,7 @@ static int fillSdpHeader(char* buffer, size_t length, int rtspClientVersion, cha
+         "o=android 0 %d IN %s %s\r\n"
+         "s=NVIDIA Streaming Client\r\n",
+         rtspClientVersion,
+-        RemoteAddr.ss_family == AF_INET ? "IPv4" : "IPv6",
++        LC_ADDR_FAMILY(&RemoteAddr) == AF_INET ? "IPv4" : "IPv6",
+         urlSafeAddr);
+ }
+ 
+diff --git a/src/VideoStream.c b/src/VideoStream.c
+index 402b056..476f612 100644
+--- a/src/VideoStream.c
++++ b/src/VideoStream.c
+@@ -328,7 +328,7 @@ int startVideoStream(void* rendererContext, int drFlags) {
+         return err;
+     }
+ 
+-    rtpSocket = bindUdpSocket(RemoteAddr.ss_family, &LocalAddr, AddrLen,
++    rtpSocket = bindUdpSocket(LC_ADDR_FAMILY(&RemoteAddr), &LocalAddr, AddrLen,
+                               RTP_RECV_PACKETS_BUFFERED * (StreamConfig.packetSize + MAX_RTP_HEADER_SIZE),
+                               SOCK_QOS_TYPE_VIDEO);
+     if (rtpSocket == INVALID_SOCKET) {

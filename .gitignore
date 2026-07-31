@@ -1,0 +1,50 @@
+# Build (CMake / Ninja)
+build/
+build-*/
+.cache/
+compile_commands.json
+
+# Failed patch leftovers (third_party trees stay dirty after apply_patches — do not commit them)
+*.rej
+*.orig
+
+# PS4 build / packaging artifacts
+*.pkg
+*.elf
+*.oelf
+*.self
+*.o
+*.a
+eboot.bin
+pkg.gp4
+pkg-stage/
+moonlight-cli
+
+# GoldHEN plugin build outputs (rebuild: make -C plugin/…)
+plugin/bin/
+
+# Local config / identity (do not commit)
+debug_host.txt
+host.txt
+pin.txt
+/certs/
+*.pem
+*.crt
+*.key
+
+# Console dumps / logs (FTP /data/moonlight/) — never ship these in the .pkg
+*.log
+vo_diag*.txt
+kernel_*.bin
+pkg/assets/misc/*
+!pkg/assets/misc/moonlight.ini
+pkg/assets/misc/moonlight/
+
+# IDE / editor / OS
+.vscode/
+.idea/
+.cursor/
+*.swp
+*~
+.DS_Store
+Thumbs.db

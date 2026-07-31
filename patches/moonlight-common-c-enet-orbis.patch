@@ -1,0 +1,109 @@
+diff --git a/unix.c b/unix.c
+index 5ad7ca9..0a47dac 100644
+--- a/unix.c
++++ b/unix.c
+@@ -204,6 +204,29 @@ typedef int socklen_t;
+ 
+ static enet_uint32 timeBase = 0;
+ 
++#if defined(__ORBIS__) || defined(__PS4__) || defined(__OPENORBIS__)
++// OpenOrbis: sockaddr_in is BSD (len@0, family@1) but sockaddr_storage.ss_family
++// is at offset 0. After memcpy of getaddrinfo/getsockname results, ss_family is
++// the length byte (16). Read family via sockaddr_in / byte 1 instead.
++static int
++enet_ss_family (const struct sockaddr_storage * ss)
++{
++    const unsigned char * b = (const unsigned char *) ss;
++    if (b[1] == AF_INET)
++        return AF_INET;
++#ifdef AF_INET6
++    if (b[1] == AF_INET6)
++        return AF_INET6;
++#endif
++    if (ss->ss_family == AF_INET)
++        return AF_INET;
++    return b[1] ? (int) b[1] : (int) ss->ss_family;
++}
++#define ENET_SS_FAMILY(ss) enet_ss_family (&(ss))
++#else
++#define ENET_SS_FAMILY(ss) ((ss).ss_family)
++#endif
++
+ int
+ enet_initialize (void)
+ {
+@@ -269,10 +292,10 @@ enet_address_make_v4mapped (ENetAddress * address)
+ int
+ enet_address_equal (ENetAddress * address1, ENetAddress * address2)
+ {
+-    if (address1 -> address.ss_family != address2 -> address.ss_family)
++    if (ENET_SS_FAMILY (address1 -> address) != ENET_SS_FAMILY (address2 -> address))
+       return 0;
+ 
+-    switch (address1 -> address.ss_family)
++    switch (ENET_SS_FAMILY (address1 -> address))
+     {
+     case AF_INET:
+     {
+@@ -302,7 +325,7 @@ enet_address_equal (ENetAddress * address1, ENetAddress * address2)
+ int
+ enet_address_wildcard (const ENetAddress * address)
+ {
+-    switch (address -> address.ss_family)
++    switch (ENET_SS_FAMILY (address -> address))
+     {
+     case AF_INET:
+     {
+@@ -326,14 +349,14 @@ enet_address_wildcard (const ENetAddress * address)
+ int
+ enet_address_set_port (ENetAddress * address, enet_uint16 port)
+ {
+-    if (address -> address.ss_family == AF_INET)
++    if (ENET_SS_FAMILY (address -> address) == AF_INET)
+     {
+         struct sockaddr_in *sin = (struct sockaddr_in *) &address -> address;
+         sin -> sin_port = ENET_HOST_TO_NET_16 (port);
+         return 0;
+     }
+ #ifdef AF_INET6
+-    else if (address -> address.ss_family == AF_INET6)
++    else if (ENET_SS_FAMILY (address -> address) == AF_INET6)
+     {
+         struct sockaddr_in6 *sin6 = (struct sockaddr_in6 *) &address -> address;
+         sin6 -> sin6_port = ENET_HOST_TO_NET_16 (port);
+@@ -678,7 +701,7 @@ enet_socket_send (ENetSocket socket,
+     // coming from the expected host.
+     if (localAddress != NULL) {
+ #ifdef IP_PKTINFO
+-        if (localAddress->address.ss_family == AF_INET) {
++        if (ENET_SS_FAMILY (localAddress->address) == AF_INET) {
+             struct in_pktinfo pktInfo;
+ 
+             pktInfo.ipi_spec_dst = ((struct sockaddr_in*)&localAddress->address)->sin_addr;
+@@ -695,7 +718,7 @@ enet_socket_send (ENetSocket socket,
+         }
+ #elif defined(IP_SENDSRCADDR)
+         // FreeBSD uses IP_SENDSRCADDR with struct in_addr instead of IP_PKTINFO
+-        if (localAddress->address.ss_family == AF_INET) {
++        if (ENET_SS_FAMILY (localAddress->address) == AF_INET) {
+             struct in_addr srcAddr = ((struct sockaddr_in*)&localAddress->address)->sin_addr;
+ 
+             msgHdr.msg_control = controlBufData;
+@@ -709,7 +732,7 @@ enet_socket_send (ENetSocket socket,
+         }
+ #endif
+ #ifdef IPV6_PKTINFO
+-        if (localAddress->address.ss_family == AF_INET6) {
++        if (ENET_SS_FAMILY (localAddress->address) == AF_INET6) {
+             struct in6_pktinfo pktInfo;
+ 
+             pktInfo.ipi6_addr = ((struct sockaddr_in6*)&localAddress->address)->sin6_addr;
+@@ -864,7 +887,7 @@ enet_socket_receive (ENetSocket socket,
+         // instead of AF_INET6 addresses then rejects those same addresses when they are passed to sendmsg().
+         // Strangely, this only happens when the socket is bound, and IPV6_PKTINFO properly returns v4-mapped
+         // addresses in the same call. This is probably a kernel bug, so we fix it up here.
+-        if (peerAddress -> address.ss_family == AF_INET && localAddress -> address.ss_family == AF_INET6) {
++        if (ENET_SS_FAMILY (peerAddress -> address) == AF_INET && ENET_SS_FAMILY (localAddress -> address) == AF_INET6) {
+             enet_address_make_v4mapped(peerAddress);
+         }
+ #endif

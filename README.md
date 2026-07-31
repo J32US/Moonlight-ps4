@@ -1,0 +1,180 @@
+# moonlight-ps4
+
+Unofficial [Moonlight](https://moonlight-stream.org/) port (Sunshine/GameStream
+game-streaming client) for jailbroken PS4 (GoldHEN), built on the
+[OpenOrbis](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain) toolchain.
+
+Full port plan: [PLAN.md](PLAN.md).
+
+**Current version: 0.8.17**
+
+## Status
+
+### Iteration 1 — playable software client
+
+- [x] Phase 0: toolchain, CMake, hello-world `.pkg`, UDP logging
+- [x] Phase 1: protocol core (pairing, applist, launch, streaming) validated on Linux against Sunshine
+- [x] Phase 2: PS4 platform layer for moonlight-common-c
+- [x] Phase 3: audio (Opus + `sceAudioOut`)
+- [x] Phase 4: software video (FFmpeg H.264 + `sceVideoOut`)
+- [x] Phase 5: input (`scePad`, DualShock 4)
+- [x] Phase 7 (partial): INI config + on-console UI menu (APPS / SETTINGS + on-screen keyboard); packaging `.pkg`
+
+
+
+### Iteration 2 — Faster
+
+- [x] Native YCbCr/NV12 presentation on `sceVideoOut` (optional; experimental)
+- [x] Hardware decoder via `libSceVideodec2` (`prefer_hw` in INI; always compiled in)
+- [x] On-console UI menu with applist, settings, pairing PIN screen
+- [ ] Broader console validation (see `[docs/CONSOLE_VALIDATE.md](docs/CONSOLE_VALIDATE.md)`)
+- [ ] mDNS host discovery
+- [ ] Advanced frame pacing (`presentationTimeUs` / `rtpTimestamp`)
+- [ ] Upstream `__ORBIS__` to moonlight-common-c
+
+
+
+## Requirements (development)
+
+- Linux x86_64 with `clang`, `ld.lld`, `cmake`, `ninja`, `git`, and `curl`
+- OpenOrbis toolchain v0.5.4 (default: `~/ps4dev/OpenOrbis/PS4Toolchain`)
+- Cross-built FFmpeg for PS4 (H.264 decoder only): `scripts/build_ffmpeg_ps4.sh`
+- For `PkgTool.Core`: `libssl.so.1.1` / `libcrypto.so.1.1` in `~/ps4dev/hostlibs/usr/lib`
+- PS4 with GoldHEN-compatible firmware (plan validated on **9.00**)
+- Host PC running [Sunshine](https://github.com/LizardByte/Sunshine)
+
+
+
+## Dependencies (third_party)
+
+Vendored libraries live as **git submodules** pinned in [`third_party/DEPS`](third_party/DEPS).
+Git only stores the commit SHA for each submodule — not a full copy of upstream.
+Orbis-specific fixes are **not** committed inside those repos; they live under
+[`patches/`](patches/) and are applied after checkout.
+
+```bash
+git clone <this-repo>
+scripts/setup_deps.sh    # checkout pins from third_party/DEPS + apply patches/
+```
+
+Equivalent manual flow: `git submodule update --init --recursive` then
+`scripts/apply_patches.sh`. After patches, `third_party/*` working trees look
+dirty — that is expected; commit patch files, not submodule dirt.
+
+To bump a dependency on purpose: edit the pin in `third_party/DEPS`, update the
+submodule to that commit, refresh patches if needed (`scripts/refresh_patches.sh`),
+and commit the new gitlink + DEPS (+ patches).
+
+## Build
+
+```bash
+git clone <this-repo>
+cd moonlight-ps4
+scripts/setup_deps.sh                # pinned third_party + Orbis patches
+scripts/build_ffmpeg_ps4.sh          # once (→ ~/ps4dev/ffmpeg-ps4)
+
+# PS4 app + .pkg (sources env.sh, configures, builds, packages)
+scripts/build_pkg.sh
+# scripts/build_pkg.sh --clean       # wipe build-ps4/ and reconfigure
+
+# Optional: Linux development CLI (pairing / H.264 dump)
+cmake -B build-host -G Ninja && cmake --build build-host
+```
+
+Installable artifact: `build-ps4/Moonlight-0.8.17.pkg`
+(also `IV0000-MLNT00001_00-MOONLIGHTPS40000.pkg`).
+
+`build_pkg.sh` runs `source scripts/env.sh` itself. Manual CMake equivalent:
+
+```bash
+source scripts/env.sh
+cmake -B build-ps4 -G Ninja -DCMAKE_TOOLCHAIN_FILE=cmake/openorbis.cmake
+cmake --build build-ps4
+```
+
+## Usage on PS4
+
+1. Install the `.pkg` (Package Installer / GoldHEN / FTP). The package uses
+  `CATEGORY=gd` (required so GoldHEN injects plugins).
+2. Optional — YCbCr presentation (`prefer_ycbcr=true`, experimental):
+  - Copy `plugin/bin/ycbcr_unlock.prx` → `/data/GoldHEN/plugins/`
+  - Add `[MLNT00001]` in `/data/GoldHEN/plugins.ini`
+  (see `[plugin/README.md](plugin/README.md)` and `plugin/plugins.ini.example`)
+  - GoldHEN → Enable plugins
+  - After each reboot, send the kpayload once:
+  `nc -w 3 <PS4_IP> 9090 < plugin/bin/ycbcr_kpatch_900.bin`
+3. On first launch the app opens the **SETTINGS** menu if no host is set. You can
+  also create `/data/moonlight/moonlight.ini` over FTP (see
+   `pkg/assets/misc/moonlight.ini`). Optional: `debug_host.txt` with your PC IP.
+4. Start Sunshine on the PC. On first pair the app shows a PIN (also written to
+  `/data/moonlight/pin.txt`); enter it at `https://<pc>:47990/pin`.
+5. Logs on the PC: `nc -ulk 9999` (or enable file log in SETTINGS →
+  `/data/moonlight/debug.log`).
+6. In the menu: **X/O** start app, **L1/R1** switch APPS/SETTINGS,
+  **OPTIONS** quit active Sunshine session, **OPTIONS + Touchpad** (~1 s) exit stream.
+
+
+
+### Defaults
+
+
+| Setting          | Default                                                        |
+| ---------------- | -------------------------------------------------------------- |
+| Resolution / FPS | 1920×1080 @ 60                                                 |
+| Bitrate          | 20 Mbps, H.264                                                 |
+| `prefer_hw`      | `true` (Videodec2)                                             |
+| `prefer_ycbcr`   | `false` (BGRA path; correct colors, SSE2 multi-thread convert) |
+| Title ID         | `MLNT00001`                                                    |
+
+
+Mean decode/convert/present times are printed every second over UDP.
+Validation protocol: `[docs/CONSOLE_VALIDATE.md](docs/CONSOLE_VALIDATE.md)`.
+
+Isolated Videodec2 spike: `videodec2_spike = true` in the INI.
+
+## Host CLI (Linux)
+
+```bash
+./build-host/moonlight-cli pair 192.168.1.100
+./build-host/moonlight-cli list 192.168.1.100
+./build-host/moonlight-cli stream 192.168.1.100 --res 1280x720 --time 20
+./build-host/moonlight-cli quit 192.168.1.100
+```
+
+
+
+## Layout
+
+```
+cmake/openorbis.cmake           CMake toolchain for PS4
+pkg/                            package assets (icon0, sce modules)
+scripts/                        env, cross FFmpeg, .pkg packaging
+src/
+  main.c stream.c config.c      orchestration + INI config
+  ui/                           on-console menu (APPS / SETTINGS + OSK)
+  gamestream/                   pairing/HTTP/XML over mbedTLS
+  audio/audio_orbis.c           Opus + sceAudioOut
+  video/renderer_videoout.c     YCbCr/NV12 or BGRA presentation (sceVideoOut)
+  video/nv12_blit.c             1088→1080 copy (WB_GARLIC / Onion alias)
+  video/decoder_ffmpeg.c        H.264 software (FFmpeg)
+  video/decoder_orbis.c         H.264 hardware (libSceVideodec2)
+  gamestream/sps.c              SPS fixup (num_ref_frames=1)
+  input/input_pad.c             DualShock 4
+  orbis/                        VideoOut / Videodec2 / net helpers
+  host/main_cli.c               Linux development CLI
+plugin/
+  ycbcr_unlock/                 GoldHEN PRX (1.63) for YCbCr VideoOut
+  ycbcr_kpatch/                 FW 9.00 kernel kpayload (BinLoader)
+  kernel_dumper_900/            kernel dump helper for RE
+docs/                           console validation + kernel YCbCr RE notes
+third_party/
+  DEPS                        pinned tags/SHAs (lockfile for setup_deps.sh)
+  moonlight-common-c          protocol engine (submodule + Orbis patches)
+  mbedtls                     crypto (v3.6.4)
+  opus                        audio
+  h264bitstream               SPS rewrite
+patches/                      Orbis patches applied by scripts/apply_patches.sh
+scripts/setup_deps.sh         checkout pins + apply patches
+scripts/apply_patches.sh
+scripts/refresh_patches.sh    regenerate patches after local dep edits
+```

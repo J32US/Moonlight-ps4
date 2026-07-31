@@ -1,0 +1,7 @@
+; GoldHEN — Moonlight (TITLE_ID=MLNT00001, CATEGORY=gd)
+[MLNT00001]
+/data/GoldHEN/plugins/ycbcr_unlock.prx
+
+; Fallback if the title section does not load:
+[default]
+/data/GoldHEN/plugins/ycbcr_unlock.prx

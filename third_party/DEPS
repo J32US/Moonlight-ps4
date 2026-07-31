@@ -1,0 +1,19 @@
+# Pinned third-party dependencies for moonlight-ps4.
+# Format: name | path | url | pin (tag or commit SHA) | notes
+#
+# The parent git repo records submodule SHAs (gitlinks). This file is the
+# human-readable lockfile used by scripts/setup_deps.sh. Update both when
+# bumping a dependency intentionally.
+#
+# Do NOT commit local edits inside third_party/* — keep them as patches/
+# and re-apply via scripts/apply_patches.sh after every clean checkout.
+
+# name                 path                                      url                                                      pin
+moonlight-common-c     third_party/moonlight-common-c            https://github.com/moonlight-stream/moonlight-common-c.git  e41355ea01670fd4c830b384009d31dd0339a705
+mbedtls                third_party/mbedtls                       https://github.com/Mbed-TLS/mbedtls.git                     v3.6.4
+opus                   third_party/opus                          https://github.com/xiph/opus.git                            v1.5.2
+h264bitstream          third_party/h264bitstream                 https://github.com/aizvorski/h264bitstream.git              70124d3051ba45e6b326264f0b25e6f48a7479e7
+
+# Nested submodules of moonlight-common-c (also pinned for reproducibility)
+enet                   third_party/moonlight-common-c/enet       https://github.com/cgutman/enet.git                         aca87840b57f045a1f7f9299e4b1b9b8e2a5e2f1
+nanors                 third_party/moonlight-common-c/nanors     https://github.com/sleepybishop/nanors.git                  b1e3c22ca0cdc0bb83e3cd6ed1a2fc77869ed99a

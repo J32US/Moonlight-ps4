@@ -1,0 +1,18 @@
+[submodule "third_party/moonlight-common-c"]
+	path = third_party/moonlight-common-c
+	url = https://github.com/moonlight-stream/moonlight-common-c.git
+	# pin: e41355ea01670fd4c830b384009d31dd0339a705 — see third_party/DEPS
+	# Patches make the working tree dirty on purpose; hide that from status.
+	ignore = dirty
+[submodule "third_party/mbedtls"]
+	path = third_party/mbedtls
+	url = https://github.com/Mbed-TLS/mbedtls.git
+	# pin: v3.6.4 (c765c831e5c2a0971410692f92f7a81d6ec65ec2)
+[submodule "third_party/opus"]
+	path = third_party/opus
+	url = https://github.com/xiph/opus.git
+	# pin: v1.5.2 (ddbe48383984d56acd9e1ab6a090c54ca6b735a6)
+[submodule "third_party/h264bitstream"]
+	path = third_party/h264bitstream
+	url = https://github.com/aizvorski/h264bitstream.git
+	# pin: 70124d3051ba45e6b326264f0b25e6f48a7479e7
