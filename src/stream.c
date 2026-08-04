@@ -223,7 +223,11 @@ start_ok:
     } else {
         int probe = video_orbis_probe(cfg->stream.width, cfg->stream.height);
         if (probe == 0) {
+            video_orbis_set_tuning(cfg->dec_pipeline_depth, cfg->dec_thread_prio,
+                                   cfg->dec_au_onion, cfg->dec_fb_garlic);
             dr = video_callbacks_orbis;
+            if (cfg->slices_per_frame > 0)
+                dr.capabilities = CAPABILITY_SLICES_PER_FRAME(cfg->slices_per_frame);
             decoder_reason = "probe OK";
         } else {
             LOGW("stream: HW probe failed rc=%d; fallback SW", probe);
@@ -237,6 +241,10 @@ start_ok:
          dr.submitDecodeUnit == video_callbacks_ffmpeg.submitDecodeUnit ? "SW" : "HW",
          cfg->prefer_hw ? "true" : "false", decoder_reason);
     AUDIO_RENDERER_CALLBACKS ar = audio_callbacks_orbis;
+
+    video_set_show_stats(cfg->show_stats);
+    if (cfg->show_stats && prefer_ycbcr)
+        LOGW("stream: Perf overlay requires BGRA; disable YCbCr to see it");
 
     LOGI("LiStartConnection begin...");
     int ret = LiStartConnection(&s_server.serverInfo, &cfg->stream, &cl, &dr, &ar,
@@ -266,6 +274,8 @@ start_ok:
                      st.frames ? (st.bounce_us_total / nf) / 1000.0 : 0.0,
                      st.frames ? (st.bgra_us_total / nf) / 1000.0 : 0.0,
                      st.frames ? (st.present_us_total / nf) / 1000.0 : 0.0);
+                LOGI("  au=%.2fms %.0fKB/frame", (st.au_us_total / nd) / 1000.0,
+                     (st.au_bytes_total / nd) / 1024.0);
                 video_reset_stats();
             }
         }

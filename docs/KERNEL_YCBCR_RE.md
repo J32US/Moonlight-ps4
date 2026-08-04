@@ -115,7 +115,7 @@ With BGRA baseline → Unregister → YCbCr (app 0.7.28 era):
 Plugin **1.48** + app **0.7.30** era: YCbCr with `n=1` (only ioctl path that worked).
 `n=3` still `0x80290001` — another kernel check pending RE.
 
-Current packaging target: app **1.0.0** (`Moonlight-1.0.0.pkg`), plugin **1.43+**,
+Current packaging target: app **1.0.7** (`Moonlight-1.0.7.pkg`), plugin **1.43+**,
 `CATEGORY=gd`. Defaults: `prefer_hw=true`, `prefer_ycbcr=false` (BGRA usable path;
 enable YCbCr via Settings / `moonlight.ini` after kpayload + plugin).
 

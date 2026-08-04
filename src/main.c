@@ -23,7 +23,7 @@
 #define CONFIG_DIR "."
 #endif
 
-#define VERSION_STR "1.0.0"
+#define VERSION_STR "1.0.7"
 
 static void read_line_file(const char *path, char *out, size_t outlen) {
     out[0] = '\0';
@@ -105,6 +105,9 @@ int main(void) {
     } else if (cfg.prefer_ycbcr) {
         LOGI("ycbcr_unlock plugin: marker OK (%s)", ML_YCBCR_PLUGIN_MARKER);
     }
+
+    /* Before any present init: the menu already brings up the BGRA path. */
+    video_present_set_bgra_tuning(cfg.bgra_workers, cfg.bgra_nt);
 
     if (cfg.videodec2_spike) {
         int spike_rc = videodec2_spike_run();

@@ -35,6 +35,12 @@ static short stick_to_short(uint8_t v) {
     return (short)centered;
 }
 
+static short stick_to_short_inverted(uint8_t v) {
+    int inverted = -(int)stick_to_short(v);
+    if (inverted > 32767) inverted = 32767;
+    return (short)inverted;
+}
+
 int input_init(void) {
     atomic_store(&s_quit, false);
     s_combo_start_us = 0;
@@ -205,9 +211,9 @@ bool input_poll(void) {
 
     // Y axis inverted: PS4 grows downward, Moonlight upward.
     short lx = stick_to_short(pad.leftStick.x);
-    short ly = (short)(-stick_to_short(pad.leftStick.y));
+    short ly = stick_to_short_inverted(pad.leftStick.y);
     short rx = stick_to_short(pad.rightStick.x);
-    short ry = (short)(-stick_to_short(pad.rightStick.y));
+    short ry = stick_to_short_inverted(pad.rightStick.y);
 
     LiSendMultiControllerEvent(0, 0x1, buttons,
                                pad.analogButtons.l2, pad.analogButtons.r2,

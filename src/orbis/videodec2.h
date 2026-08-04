@@ -99,9 +99,21 @@ typedef struct {
 typedef void *OrbisVideodec2Decoder;
 typedef void *OrbisVideodec2ComputeQueue;
 
-static inline void videodec2_fill_decoder_config(OrbisVideodec2DecoderConfigInfo *dc,
-                                                   OrbisVideodec2ComputeQueue q,
-                                                   int w, int h) {
+/* Frames Videodec2 may have in flight. Each one needs its own framebuffer, so
+ * this also bounds how many the caller has to allocate and rotate. */
+#define ORBIS_VIDEODEC2_MAX_PIPELINE_DEPTH 4
+
+static inline void videodec2_fill_decoder_config_ex(OrbisVideodec2DecoderConfigInfo *dc,
+                                                    OrbisVideodec2ComputeQueue q,
+                                                    int w, int h,
+                                                    int pipelineDepth, int cpuPriority) {
+    if (pipelineDepth < 1)
+        pipelineDepth = 1;
+    if (pipelineDepth > ORBIS_VIDEODEC2_MAX_PIPELINE_DEPTH)
+        pipelineDepth = ORBIS_VIDEODEC2_MAX_PIPELINE_DEPTH;
+    if (cpuPriority <= 0)
+        cpuPriority = ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT;
+
     memset(dc, 0, sizeof(*dc));
     dc->thisSize = sizeof(*dc);
     dc->resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED;
@@ -113,13 +125,21 @@ static inline void videodec2_fill_decoder_config(OrbisVideodec2DecoderConfigInfo
     dc->maxFrameHeight = (h + 15) & ~15;
     /* dpb=1 + stream with refs → Decode ~150ms and IDR storm. 4 = typical NVENC. */
     dc->maxDpbFrameCount = 4;
-    dc->decodePipelineDepth = 1;
+    /* depth=1 serialises submit→wait against the compute queue every frame. */
+    dc->decodePipelineDepth = (uint32_t)pipelineDepth;
     dc->computeQueue = q;
     dc->cpuAffinityMask = ORBIS_VIDEODEC2_AFFINITY_ALL;
-    dc->cpuThreadPriority = ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT;
+    dc->cpuThreadPriority = cpuPriority;
     dc->optimizeProgressiveVideo = true;
     // checkMemoryType=0: validated in 0.4.x; with 1 + AU Onion the Vdec worker SIGSEGV.
     dc->checkMemoryType = false;
+}
+
+static inline void videodec2_fill_decoder_config(OrbisVideodec2DecoderConfigInfo *dc,
+                                                   OrbisVideodec2ComputeQueue q,
+                                                   int w, int h) {
+    videodec2_fill_decoder_config_ex(dc, q, w, h, 1,
+                                     ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT);
 }
 
 typedef int32_t (*sceVideodec2QueryComputeMemoryInfo_t)(OrbisVideodec2ComputeMemoryInfo *);

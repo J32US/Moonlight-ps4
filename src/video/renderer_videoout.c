@@ -3,6 +3,7 @@
 #include "nv12_blit.h"
 #include "../log.h"
 #include "../orbis/video_out_c.h"
+#include "../ui/ui_draw.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -39,40 +40,59 @@ static int s_ycc_hrep4;  /* 1: expand ×4; 0: NV12 packed */
 static int s_gray_left;  /* gray test frames at start */
 static int s_last_flip_idx = -1;
 static int s_flip_wait_logs;
+static int s_show_stats;
 
 /*
- * BGRA MT: 2 workers [0,mid)/[mid,h). Pipeline: kick async → Decode overlaps convert;
- * finish=join+flip. Always Decode in decoder (do not skip H.264 refs).
+ * BGRA MT: workers claim row bands off an atomic counter, so a slow band does
+ * not stall the frame the way a fixed half-split does. Pipeline: kick async →
+ * Decode overlaps convert; finish=join+flip. Always Decode in decoder (do not
+ * skip H.264 refs).
  */
 typedef struct {
     uint8_t *dst;
     int dst_pitch;
-    int w;
-    int row0;
-    int row1;
+    int dst_w;
+    int dst_h;
+    int src_w;
+    int src_h;
     const uint8_t *y;
     const uint8_t *uv;
     int pitch_y;
     int pitch_uv;
+    int nbands;
+    const int *x_lut; /* dst-col -> src-col; NULL when src/dst sizes match */
 } nv12_bgra_job_t;
 
-#define BGRA_WORKERS 2
-static pthread_t s_bgra_thr[BGRA_WORKERS];
+#define BGRA_WORKERS_MAX 6
+#define BGRA_WORKERS_DEFAULT 4
+/* Even (4:2:0 pairs rows) and a multiple of 2 so band starts stay 64B-aligned. */
+#define BGRA_BAND_ROWS 32
+static pthread_t s_bgra_thr[BGRA_WORKERS_MAX];
 static pthread_mutex_t s_bgra_mtx = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t s_bgra_cv = PTHREAD_COND_INITIALIZER;
+static int s_bgra_workers = BGRA_WORKERS_DEFAULT;
 static int s_bgra_worker_alive;
 static int s_bgra_shutdown;
-static int s_bgra_slot_pending[BGRA_WORKERS];
+static int s_bgra_seq;         /* work generation; workers wake when it moves */
 static int s_bgra_outstanding;
-static uint64_t s_bgra_job_us; /* max half ≈ wall convert approx */
-static nv12_bgra_job_t s_bgra_jobs[BGRA_WORKERS];
+static uint64_t s_bgra_job_us; /* slowest participant ≈ wall convert approx */
+static nv12_bgra_job_t s_bgra_job;
+/* Own cache line: hammered with lock xadd by every worker, while s_bgra_job
+ * right above is read on each claim. */
+static int s_bgra_next_band __attribute__((aligned(64)));
+
+/* -1 = pick from the framebuffer mapping, 0/1 = forced from moonlight.ini. */
+static int s_bgra_nt_pref = -1;
+static int s_bgra_nt;         /* resolved: 1 = streaming stores */
 
 static int s_pipe_active;
 static int s_pipe_fb_idx = -1;
 
 static void bgra_worker_start(void);
 static void bgra_worker_stop(void);
-static void bgra_convert_kick(uint8_t *dst, int dst_pitch, int w, int h,
+static void bgra_resolve_store_mode(void);
+static void bgra_convert_kick(uint8_t *dst, int dst_pitch,
+                              int src_w, int src_h, int dst_w, int dst_h,
                               const uint8_t *y, const uint8_t *uv,
                               int pitch_y, int pitch_uv, int main_helps);
 static void bgra_convert_wait(void);
@@ -411,10 +431,83 @@ static void yuv_to_bgra(uint8_t *dst, int dst_pitch, int w, int h,
     }
 }
 
+/*
+ * Nearest-neighbour horizontal LUT cache: streamed resolution stays fixed for
+ * the whole session, so this is computed once and reused every frame. Shared
+ * (read-only once built) by every BGRA worker thread.
+ */
+#define SCALE_LUT_MAX 1920
+static int s_scale_lut[SCALE_LUT_MAX];
+static int s_scale_lut_dst_w, s_scale_lut_src_w;
+
+static const int *scale_lut_get(int dst_w, int src_w) {
+    if (dst_w <= 0 || src_w <= 0 || dst_w > SCALE_LUT_MAX)
+        return NULL;
+    if (dst_w == s_scale_lut_dst_w && src_w == s_scale_lut_src_w)
+        return s_scale_lut;
+    for (int x = 0; x < dst_w; x++) {
+        int sx = (int)(((int64_t)x * src_w) / dst_w);
+        if (sx >= src_w)
+            sx = src_w - 1;
+        s_scale_lut[x] = sx;
+    }
+    s_scale_lut_dst_w = dst_w;
+    s_scale_lut_src_w = src_w;
+    return s_scale_lut;
+}
+
+static inline int scale_src_row(int dst_row, int dst_h, int src_h) {
+    int sr = (int)(((int64_t)dst_row * src_h) / dst_h);
+    if (sr >= src_h)
+        sr = src_h - 1;
+    return sr;
+}
+
+/* Stretch YUV420P (3 planes) to fill dst_w x dst_h — used when the decoded
+ * frame size (src_w x src_h) does not match the registered VideoOut buffer
+ * (e.g. streaming at 720p onto a 1080p output): without this the picture
+ * only occupies the top-left src_w x src_h corner of the screen. */
+static void yuv_to_bgra_scaled(uint8_t *dst, int dst_pitch, int dst_w, int dst_h,
+                               const uint8_t *y, const uint8_t *u, const uint8_t *v,
+                               int pitch_y, int pitch_u, int pitch_v,
+                               int src_w, int src_h, const int *x_lut) {
+    (void)src_w;
+    for (int row = 0; row < dst_h; row++) {
+        int src_row = scale_src_row(row, dst_h, src_h);
+        int uv_row = src_row / 2;
+        uint8_t *drow = dst + (size_t)row * (size_t)dst_pitch;
+        const uint8_t *yrow = y + (size_t)src_row * (size_t)pitch_y;
+        const uint8_t *urow = u + (size_t)uv_row * (size_t)pitch_u;
+        const uint8_t *vrow = v + (size_t)uv_row * (size_t)pitch_v;
+        for (int x = 0; x < dst_w; x++) {
+            int sx = x_lut[x];
+            int yy = yrow[sx];
+            int uu = (int)urow[sx / 2] - 128;
+            int vv = (int)vrow[sx / 2] - 128;
+            int r = yy + ((179 * vv) >> 7);
+            int g = yy - ((44 * uu + 92 * vv) >> 7);
+            int b = yy + ((227 * uu) >> 7);
+            drow[x * 4 + 0] = clamp_u8(b);
+            drow[x * 4 + 1] = clamp_u8(g);
+            drow[x * 4 + 2] = clamp_u8(r);
+            drow[x * 4 + 3] = 0xFF;
+        }
+    }
+}
+
+/*
+ * Store mode for the BGRA output. Non-temporal only pays off on WC_GARLIC:
+ * on the ONION/WB alias the cache is what hides the coherent bus latency, and
+ * bypassing it measured ~6x slower (8.3 ms vs 1.4 ms per 1080p frame).
+ */
+#define BGRA_ST_UNALIGNED 0
+#define BGRA_ST_ALIGNED   1
+#define BGRA_ST_NT        2
+
 /* 8 px BGRA from Y (epi16) + precomputed chroma terms. */
 static inline __attribute__((always_inline)) void
 bgra_store8(uint8_t *dp, __m128i y16, __m128i rv, __m128i guv, __m128i bu,
-            __m128i a255, const int aligned) {
+            __m128i a255, const int st_mode) {
     __m128i r = _mm_add_epi16(y16, rv);
     __m128i g = _mm_sub_epi16(y16, guv);
     __m128i b = _mm_add_epi16(y16, bu);
@@ -424,7 +517,11 @@ bgra_store8(uint8_t *dp, __m128i y16, __m128i rv, __m128i guv, __m128i bu,
     __m128i ra0 = _mm_unpackhi_epi8(br, ga);
     __m128i px0 = _mm_unpacklo_epi16(bg0, ra0);
     __m128i px1 = _mm_unpackhi_epi16(bg0, ra0);
-    if (aligned) {
+    if (st_mode == BGRA_ST_NT) {
+        /* Callers pair +0/+32 so full 64B lines are written. */
+        _mm_stream_si128((__m128i *)(void *)dp, px0);
+        _mm_stream_si128((__m128i *)(void *)(dp + 16), px1);
+    } else if (st_mode == BGRA_ST_ALIGNED) {
         _mm_store_si128((__m128i *)(void *)dp, px0);
         _mm_store_si128((__m128i *)(void *)(dp + 16), px1);
     } else {
@@ -442,8 +539,8 @@ static inline void nv12_to_bgra_px(uint8_t *dp, int yy, int uu, int vv) {
 
 /*
  * 16 px/iter, 2 Y rows per UV row (4:2:0: chroma computed once per pair),
- * prefetch next row pair (Jaguar). Constant `aligned` → compiler emits
- * the aligned-store variant.
+ * prefetch next row pair (Jaguar). Constant `st_mode` → compiler emits
+ * a single store variant per instantiation.
  *
  * Coefs >>7 (179/44/92/227): ≈ BT.601 JPEG and |chroma|·coeff ≤ 28829 < 32768
  * → mullo_epi16 without wrap (>>8 path with 359/454 painted lilac as #ffc400).
@@ -451,7 +548,7 @@ static inline void nv12_to_bgra_px(uint8_t *dp, int yy, int uu, int vv) {
 static inline __attribute__((always_inline)) void
 nv12_to_bgra_impl(uint8_t *dst, int dst_pitch, int w, int h,
                   const uint8_t *y, const uint8_t *uv,
-                  int pitch_y, int pitch_uv, const int aligned) {
+                  int pitch_y, int pitch_uv, const int st_mode) {
     const __m128i zero = _mm_setzero_si128();
     const __m128i m00ff = _mm_set1_epi16(0x00FF);
     const __m128i c128 = _mm_set1_epi16(128);
@@ -494,13 +591,13 @@ nv12_to_bgra_impl(uint8_t *dst, int dst_pitch, int w, int h,
             __m128i y0 = _mm_loadu_si128((const __m128i *)(const void *)(yrow0 + x));
             __m128i y1 = _mm_loadu_si128((const __m128i *)(const void *)(yrow1 + x));
             bgra_store8(drow0 + (size_t)x * 4,
-                        _mm_unpacklo_epi8(y0, zero), rv_lo, guv_lo, bu_lo, a255, aligned);
+                        _mm_unpacklo_epi8(y0, zero), rv_lo, guv_lo, bu_lo, a255, st_mode);
             bgra_store8(drow0 + (size_t)x * 4 + 32,
-                        _mm_unpackhi_epi8(y0, zero), rv_hi, guv_hi, bu_hi, a255, aligned);
+                        _mm_unpackhi_epi8(y0, zero), rv_hi, guv_hi, bu_hi, a255, st_mode);
             bgra_store8(drow1 + (size_t)x * 4,
-                        _mm_unpacklo_epi8(y1, zero), rv_lo, guv_lo, bu_lo, a255, aligned);
+                        _mm_unpacklo_epi8(y1, zero), rv_lo, guv_lo, bu_lo, a255, st_mode);
             bgra_store8(drow1 + (size_t)x * 4 + 32,
-                        _mm_unpackhi_epi8(y1, zero), rv_hi, guv_hi, bu_hi, a255, aligned);
+                        _mm_unpackhi_epi8(y1, zero), rv_hi, guv_hi, bu_hi, a255, st_mode);
         }
         for (; x < w; x++) {
             int uu = (int)uvrow[(x / 2) * 2] - 128;
@@ -532,39 +629,116 @@ static void nv12_to_bgra_rows(uint8_t *dst, int dst_pitch, int w,
     const uint8_t *yp = y + (size_t)row0 * (size_t)pitch_y;
     const uint8_t *uvp = uv + (size_t)(row0 / 2) * (size_t)pitch_uv;
     int h = row1 - row0;
-    if ((((uintptr_t)d | (uintptr_t)(unsigned)dst_pitch) & 15u) == 0)
-        nv12_to_bgra_impl(d, dst_pitch, w, h, yp, uvp, pitch_y, pitch_uv, 1);
+    if ((((uintptr_t)d | (uintptr_t)(unsigned)dst_pitch) & 15u) != 0)
+        nv12_to_bgra_impl(d, dst_pitch, w, h, yp, uvp, pitch_y, pitch_uv,
+                          BGRA_ST_UNALIGNED);
+    else if (s_bgra_nt)
+        nv12_to_bgra_impl(d, dst_pitch, w, h, yp, uvp, pitch_y, pitch_uv,
+                          BGRA_ST_NT);
     else
-        nv12_to_bgra_impl(d, dst_pitch, w, h, yp, uvp, pitch_y, pitch_uv, 0);
+        nv12_to_bgra_impl(d, dst_pitch, w, h, yp, uvp, pitch_y, pitch_uv,
+                          BGRA_ST_ALIGNED);
+}
+
+/* Scalar nearest-neighbour scale (NV12 src_w x src_h -> dst_w x dst_h), rows
+ * [row0,row1) of the destination. Slower than the SIMD 1:1 path but only
+ * runs when the streamed resolution differs from the VideoOut buffer. */
+static void nv12_to_bgra_rows_scaled(uint8_t *dst, int dst_pitch, int dst_w,
+                                     int row0, int row1, int dst_h,
+                                     const uint8_t *y, const uint8_t *uv,
+                                     int pitch_y, int pitch_uv,
+                                     int src_h, const int *x_lut) {
+    for (int row = row0; row < row1; row++) {
+        int src_row = scale_src_row(row, dst_h, src_h);
+        int uv_row = src_row / 2;
+        uint8_t *drow = dst + (size_t)row * (size_t)dst_pitch;
+        const uint8_t *yrow = y + (size_t)src_row * (size_t)pitch_y;
+        const uint8_t *uvrow = uv + (size_t)uv_row * (size_t)pitch_uv;
+        for (int x = 0; x < dst_w; x++) {
+            int sx = x_lut[x];
+            int uvx = (sx / 2) * 2;
+            nv12_to_bgra_px(drow + (size_t)x * 4, yrow[sx],
+                            (int)uvrow[uvx] - 128, (int)uvrow[uvx + 1] - 128);
+        }
+    }
+}
+
+/* Drain the band queue of the current job. Runs on workers and, when the
+ * caller helps, on the calling thread too. */
+static void bgra_run_bands(void) {
+    const nv12_bgra_job_t *j = &s_bgra_job;
+    for (;;) {
+        int b = __atomic_fetch_add(&s_bgra_next_band, 1, __ATOMIC_RELAXED);
+        if (b >= j->nbands)
+            break;
+        int row0 = b * BGRA_BAND_ROWS;
+        int row1 = row0 + BGRA_BAND_ROWS;
+        if (row1 > j->dst_h)
+            row1 = j->dst_h;
+        if (j->x_lut) {
+            nv12_to_bgra_rows_scaled(j->dst, j->dst_pitch, j->dst_w, row0, row1,
+                                     j->dst_h, j->y, j->uv, j->pitch_y, j->pitch_uv,
+                                     j->src_h, j->x_lut);
+        } else {
+            nv12_to_bgra_rows(j->dst, j->dst_pitch, j->dst_w, row0, row1,
+                              j->y, j->uv, j->pitch_y, j->pitch_uv);
+        }
+    }
+    /* Flush the WC buffers of this thread's streaming stores. */
+    _mm_sfence();
+}
+
+static void bgra_note_elapsed(uint64_t dt) {
+    pthread_mutex_lock(&s_bgra_mtx);
+    if (dt > s_bgra_job_us)
+        s_bgra_job_us = dt;
+    pthread_mutex_unlock(&s_bgra_mtx);
 }
 
 static void *bgra_worker_main(void *arg) {
-    int id = (int)(intptr_t)arg;
+    (void)arg;
+    int seen = 0;
     for (;;) {
         pthread_mutex_lock(&s_bgra_mtx);
-        while (!s_bgra_slot_pending[id] && !s_bgra_shutdown)
+        while (s_bgra_seq == seen && !s_bgra_shutdown)
             pthread_cond_wait(&s_bgra_cv, &s_bgra_mtx);
-        if (s_bgra_shutdown && !s_bgra_slot_pending[id]) {
+        if (s_bgra_shutdown) {
             pthread_mutex_unlock(&s_bgra_mtx);
             break;
         }
-        nv12_bgra_job_t job = s_bgra_jobs[id];
-        s_bgra_slot_pending[id] = 0;
+        seen = s_bgra_seq;
         pthread_mutex_unlock(&s_bgra_mtx);
 
         uint64_t t0 = now_us();
-        nv12_to_bgra_rows(job.dst, job.dst_pitch, job.w, job.row0, job.row1,
-                          job.y, job.uv, job.pitch_y, job.pitch_uv);
+        bgra_run_bands();
         uint64_t dt = now_us() - t0;
 
         pthread_mutex_lock(&s_bgra_mtx);
         if (dt > s_bgra_job_us)
             s_bgra_job_us = dt;
-        s_bgra_outstanding--;
-        pthread_cond_broadcast(&s_bgra_cv);
+        if (--s_bgra_outstanding == 0)
+            pthread_cond_broadcast(&s_bgra_cv);
         pthread_mutex_unlock(&s_bgra_mtx);
     }
     return NULL;
+}
+
+/* WC_GARLIC has no cache to hide the write latency, so streaming stores win
+ * there. On the ONION/WB alias they lose badly; keep the cache in the path. */
+static void bgra_resolve_store_mode(void) {
+    s_bgra_nt = s_bgra_nt_pref >= 0 ? (s_bgra_nt_pref ? 1 : 0)
+                                    : (s_present_wb ? 0 : 1);
+}
+
+void video_present_set_bgra_tuning(int workers, int nt_pref) {
+    if (workers > 0) {
+        if (workers > BGRA_WORKERS_MAX)
+            workers = BGRA_WORKERS_MAX;
+        s_bgra_workers = workers;
+    }
+    s_bgra_nt_pref = nt_pref;
+    bgra_resolve_store_mode();
+    LOGI("present: BGRA tuning workers=%d nt_pref=%d", s_bgra_workers, nt_pref);
 }
 
 static void bgra_worker_start(void) {
@@ -572,14 +746,16 @@ static void bgra_worker_start(void) {
         return;
     s_bgra_shutdown = 0;
     s_bgra_outstanding = 0;
-    memset(s_bgra_slot_pending, 0, sizeof(s_bgra_slot_pending));
+    s_bgra_seq = 0;
+    s_bgra_next_band = 0;
+    s_bgra_job.nbands = 0;
+    int want = s_bgra_workers;
     int ok = 0;
-    for (int i = 0; i < BGRA_WORKERS; i++) {
-        if (pthread_create(&s_bgra_thr[i], NULL, bgra_worker_main,
-                           (void *)(intptr_t)i) == 0)
+    for (int i = 0; i < want; i++) {
+        if (pthread_create(&s_bgra_thr[i], NULL, bgra_worker_main, NULL) == 0)
             ok++;
     }
-    if (ok == BGRA_WORKERS) {
+    if (ok == want) {
         s_bgra_worker_alive = 1;
     } else {
         s_bgra_shutdown = 1;
@@ -588,7 +764,7 @@ static void bgra_worker_start(void) {
             pthread_join(s_bgra_thr[i], NULL);
         s_bgra_shutdown = 0;
         LOGW("present: BGRA workers create failed (%d/%d); single-thread",
-             ok, BGRA_WORKERS);
+             ok, want);
     }
 }
 
@@ -599,62 +775,68 @@ static void bgra_worker_stop(void) {
     s_bgra_shutdown = 1;
     pthread_cond_broadcast(&s_bgra_cv);
     pthread_mutex_unlock(&s_bgra_mtx);
-    for (int i = 0; i < BGRA_WORKERS; i++)
+    for (int i = 0; i < s_bgra_workers; i++)
         pthread_join(s_bgra_thr[i], NULL);
     s_bgra_worker_alive = 0;
     s_bgra_shutdown = 0;
     s_bgra_outstanding = 0;
 }
 
-static void bgra_convert_kick(uint8_t *dst, int dst_pitch, int w, int h,
+/* src_w/src_h: decoded frame size. dst_w/dst_h: VideoOut buffer size (always
+ * the display's registered resolution). When they differ the frame is
+ * nearest-neighbour scaled to fill the whole buffer instead of only writing
+ * its top-left src_w x src_h corner. */
+static void bgra_convert_kick(uint8_t *dst, int dst_pitch,
+                              int src_w, int src_h, int dst_w, int dst_h,
                               const uint8_t *y, const uint8_t *uv,
                               int pitch_y, int pitch_uv, int main_helps) {
-    int mid = (h / 2) & ~1;
-    if (!s_bgra_worker_alive || mid < 2 || h - mid < 2) {
+    const int *lut = (src_w == dst_w && src_h == dst_h)
+                          ? NULL
+                          : scale_lut_get(dst_w, src_w);
+    /* LUT unavailable (dst_w > SCALE_LUT_MAX): fall back to 1:1 clipped copy
+     * rather than reading out of bounds. */
+    if (!lut && (src_w != dst_w || src_h != dst_h)) {
+        dst_w = src_w < dst_w ? src_w : dst_w;
+        dst_h = src_h < dst_h ? src_h : dst_h;
+    }
+
+    if (!s_bgra_worker_alive || dst_h < 2) {
         uint64_t t0 = now_us();
-        nv12_to_bgra_rows(dst, dst_pitch, w, 0, h, y, uv, pitch_y, pitch_uv);
+        if (lut)
+            nv12_to_bgra_rows_scaled(dst, dst_pitch, dst_w, 0, dst_h, dst_h,
+                                     y, uv, pitch_y, pitch_uv, src_h, lut);
+        else
+            nv12_to_bgra_rows(dst, dst_pitch, dst_w, 0, dst_h, y, uv, pitch_y, pitch_uv);
+        _mm_sfence();
         s_bgra_job_us = now_us() - t0;
         return;
     }
     pthread_mutex_lock(&s_bgra_mtx);
     s_bgra_job_us = 0;
-    s_bgra_jobs[0].dst = dst;
-    s_bgra_jobs[0].dst_pitch = dst_pitch;
-    s_bgra_jobs[0].w = w;
-    s_bgra_jobs[0].row0 = 0;
-    s_bgra_jobs[0].row1 = mid;
-    s_bgra_jobs[0].y = y;
-    s_bgra_jobs[0].uv = uv;
-    s_bgra_jobs[0].pitch_y = pitch_y;
-    s_bgra_jobs[0].pitch_uv = pitch_uv;
-    s_bgra_slot_pending[0] = 1;
-    if (main_helps) {
-        /* Sync: worker [0,mid) + main [mid,h). Main not idle waiting on 2 threads. */
-        s_bgra_outstanding = 1;
-        pthread_cond_broadcast(&s_bgra_cv);
-        pthread_mutex_unlock(&s_bgra_mtx);
-        uint64_t t0 = now_us();
-        nv12_to_bgra_rows(dst, dst_pitch, w, mid, h, y, uv, pitch_y, pitch_uv);
-        uint64_t dt = now_us() - t0;
-        pthread_mutex_lock(&s_bgra_mtx);
-        if (dt > s_bgra_job_us)
-            s_bgra_job_us = dt;
-        pthread_mutex_unlock(&s_bgra_mtx);
-        return;
-    }
-    s_bgra_jobs[1].dst = dst;
-    s_bgra_jobs[1].dst_pitch = dst_pitch;
-    s_bgra_jobs[1].w = w;
-    s_bgra_jobs[1].row0 = mid;
-    s_bgra_jobs[1].row1 = h;
-    s_bgra_jobs[1].y = y;
-    s_bgra_jobs[1].uv = uv;
-    s_bgra_jobs[1].pitch_y = pitch_y;
-    s_bgra_jobs[1].pitch_uv = pitch_uv;
-    s_bgra_slot_pending[1] = 1;
-    s_bgra_outstanding = BGRA_WORKERS;
+    s_bgra_job.dst = dst;
+    s_bgra_job.dst_pitch = dst_pitch;
+    s_bgra_job.dst_w = dst_w;
+    s_bgra_job.dst_h = dst_h;
+    s_bgra_job.src_w = src_w;
+    s_bgra_job.src_h = src_h;
+    s_bgra_job.y = y;
+    s_bgra_job.uv = uv;
+    s_bgra_job.pitch_y = pitch_y;
+    s_bgra_job.pitch_uv = pitch_uv;
+    s_bgra_job.x_lut = lut;
+    s_bgra_job.nbands = (dst_h + BGRA_BAND_ROWS - 1) / BGRA_BAND_ROWS;
+    __atomic_store_n(&s_bgra_next_band, 0, __ATOMIC_RELAXED);
+    s_bgra_outstanding = s_bgra_workers;
+    s_bgra_seq++;
     pthread_cond_broadcast(&s_bgra_cv);
     pthread_mutex_unlock(&s_bgra_mtx);
+
+    if (main_helps) {
+        /* Sync path: the caller would only sit blocked otherwise. */
+        uint64_t t0 = now_us();
+        bgra_run_bands();
+        bgra_note_elapsed(now_us() - t0);
+    }
 }
 
 static void bgra_convert_wait(void) {
@@ -666,10 +848,11 @@ static void bgra_convert_wait(void) {
     pthread_mutex_unlock(&s_bgra_mtx);
 }
 
-static void nv12_to_bgra(uint8_t *dst, int dst_pitch, int w, int h,
+static void nv12_to_bgra(uint8_t *dst, int dst_pitch,
+                         int src_w, int src_h, int dst_w, int dst_h,
                          const uint8_t *y, const uint8_t *uv,
                          int pitch_y, int pitch_uv) {
-    bgra_convert_kick(dst, dst_pitch, w, h, y, uv, pitch_y, pitch_uv, 1);
+    bgra_convert_kick(dst, dst_pitch, src_w, src_h, dst_w, dst_h, y, uv, pitch_y, pitch_uv, 1);
     bgra_convert_wait();
 }
 
@@ -706,6 +889,7 @@ int video_present_init(int w, int h, int prefer_ycbcr) {
         s_gray_left = 0;
         s_pipe_active = 0;
         s_pipe_fb_idx = -1;
+        bgra_resolve_store_mode();
         bgra_worker_start();
         return 0;
     }
@@ -883,9 +1067,12 @@ bgra_debug:
     s_last_flip_idx = 0;
     s_fb_index = 0;
     nv12_blit_init();
+    bgra_resolve_store_mode();
     bgra_worker_start();
-    LOGI("present_mode=BGRA plugin=%s buf_h=%d n=%d wb=%d convert=sse2_mt",
-         s_plugin_ok ? "OK" : "MISSING", s_buf_h, s_fb_count, s_present_wb);
+    LOGI("present_mode=BGRA plugin=%s buf_h=%d n=%d wb=%d convert=sse2_mt "
+         "workers=%d nt=%d",
+         s_plugin_ok ? "OK" : "MISSING", s_buf_h, s_fb_count, s_present_wb,
+         s_bgra_workers, s_bgra_nt);
     return 0;
 }
 
@@ -936,7 +1123,96 @@ static int pick_free_fb(int *out_shown) {
     return next;
 }
 
+void video_set_show_stats(int enable) {
+    s_show_stats = enable ? 1 : 0;
+}
+
+/* Colors 0xAARRGGBB (BGRA LE); the output plane ignores alpha (see ui_menu.c). */
+#define STATS_COL_BG      0xFF141B24u
+#define STATS_COL_ACCENT  0xFF3FA7FFu
+#define STATS_COL_TEXT    0xFFE8ECF0u
+#define STATS_COL_DIM     0xFF8794A2u
+#define STATS_COL_GOOD    0xFF6FF08Fu
+#define STATS_COL_WARN    0xFFFFB03Fu
+#define STATS_COL_BAD     0xFFFF4D4Du
+#define STATS_COL_GRAPH_BG 0xFF0B0F14u
+
+/* Perf overlay: FPS/decode/convert/present/KB-per-frame + a frame-time
+ * timeline (bar per recent frame; green/amber/red vs. 60/30 fps budgets).
+ * Draws directly onto the BGRA backbuffer before it is flushed/flipped, so
+ * it is redrawn fresh every frame (no need to erase it beforehand). */
+static void draw_stats_overlay(uint8_t *dst) {
+    video_live_stats_t live;
+    video_stats_get_live(&live);
+
+    ui_surface_t s = { dst, s_pitch, s_width, s_buf_h };
+
+    const int scale = 2;
+    const int line_h = 8 * scale + 6;
+    const int graph_w = 240, graph_h = 56;
+    const int px = 24, py = 24;
+    const int pad = 12;
+    const int pw = graph_w + pad * 2;
+    const int ph = pad + line_h * 4 + 8 + graph_h + pad;
+
+    ui_rect(&s, px, py, pw, ph, STATS_COL_BG);
+    ui_rect(&s, px, py, pw, 3, STATS_COL_ACCENT);
+
+    char line[64];
+    int ty = py + pad;
+    int tx = px + pad;
+
+    snprintf(line, sizeof(line), "FPS %.1f", (double)live.fps);
+    ui_text(&s, tx, ty, scale, STATS_COL_GOOD, line);
+    ty += line_h;
+
+    snprintf(line, sizeof(line), "DEC %.1fms  CONV %.1fms",
+             (double)live.decode_ms, (double)live.convert_ms);
+    ui_text(&s, tx, ty, scale, STATS_COL_TEXT, line);
+    ty += line_h;
+
+    snprintf(line, sizeof(line), "PRES %.1fms  TOT %.1fms", (double)live.present_ms,
+             (double)(live.decode_ms + live.convert_ms + live.present_ms));
+    ui_text(&s, tx, ty, scale, STATS_COL_TEXT, line);
+    ty += line_h;
+
+    snprintf(line, sizeof(line), "%.0f KB/frame", (double)live.kb_per_frame);
+    ui_text(&s, tx, ty, scale, STATS_COL_DIM, line);
+    ty += line_h + 8;
+
+    /* Frame-time timeline: oldest on the left, most recent on the right. */
+    int gx = tx, gy = ty;
+    ui_rect(&s, gx, gy, graph_w, graph_h, STATS_COL_GRAPH_BG);
+
+    float max_ms = 16.7f; /* floor at 60fps so a perfectly smooth feed still shows some bar */
+    for (int i = 0; i < live.frame_count; i++)
+        if (live.frame_ms[i] > max_ms)
+            max_ms = live.frame_ms[i];
+
+    const int bar_w = 2, gap = 1;
+    int nbars = graph_w / (bar_w + gap);
+    if (nbars > live.frame_count)
+        nbars = live.frame_count;
+    int x0 = gx + graph_w - nbars * (bar_w + gap);
+    for (int i = 0; i < nbars; i++) {
+        int src_idx = live.frame_count - nbars + i;
+        float ms = live.frame_ms[src_idx];
+        int h = (int)(ms / max_ms * graph_h + 0.5f);
+        if (h > graph_h) h = graph_h;
+        if (h < 1) h = 1;
+        uint32_t col = STATS_COL_GOOD;
+        if (ms > 33.3f)
+            col = STATS_COL_BAD; /* below 30fps budget */
+        else if (ms > 16.7f)
+            col = STATS_COL_WARN; /* below 60fps budget */
+        ui_rect(&s, x0 + i * (bar_w + gap), gy + graph_h - h, bar_w, h, col);
+    }
+}
+
 static void present_submit_flip(int next, uint8_t *dst, uint64_t convert_us) {
+    if (s_show_stats && s_use_bgra)
+        draw_stats_overlay(dst);
+
     __asm__ volatile("sfence" ::: "memory");
     sceGnmFlushGarlic();
 
@@ -990,6 +1266,21 @@ int video_present_should_drop(void) {
     return busy >= 1 ? 1 : 0;
 }
 
+/* Real flip backlog only (does not count the in-flight pipe convert). The
+ * decoder polls this before Decode, when the previous frame's convert is
+ * legitimately still running; counting it (should_drop) would skip most
+ * frames in steady state. */
+int video_present_flip_backlogged(void) {
+    if (s_video < 0 || s_fb_count < 1)
+        return 0;
+    MlVideoOutFlipStatus st;
+    if (sceVideoOutGetFlipStatus(s_video, &st) != 0)
+        return 0;
+    if (s_fb_count > 1)
+        return st.numFlipPending >= s_fb_count - 1 ? 1 : 0;
+    return st.numFlipPending >= 1 ? 1 : 0;
+}
+
 int video_present_bgra_pipe_finish(void) {
     if (!s_pipe_active || s_pipe_fb_idx < 0)
         return 0;
@@ -1021,11 +1312,14 @@ int video_present_bgra_pipe_kick(const uint8_t *y, const uint8_t *uv,
     }
 
     uint8_t *dst = (uint8_t *)s_fb_cpu[next];
-    int rows = h < s_buf_h ? h : s_buf_h;
     const uint8_t *src_uv = uv ? uv : y + (size_t)pitch_y * (size_t)h;
     int src_uv_pitch = pitch_uv ? pitch_uv : pitch_y;
 
-    bgra_convert_kick(dst, s_pitch, w, rows, y, src_uv, pitch_y, src_uv_pitch, 0);
+    /* Scale src (w x h, decoded) to fill the registered VideoOut buffer
+     * (s_width x s_buf_h, the actual display resolution) instead of only
+     * writing the top-left w x h corner. */
+    bgra_convert_kick(dst, s_pitch, w, h, s_width, s_buf_h,
+                      y, src_uv, pitch_y, src_uv_pitch, 0);
     s_pipe_fb_idx = next;
     s_pipe_active = 1;
     return 0;
@@ -1063,18 +1357,32 @@ int video_present_frame(const uint8_t *y, const uint8_t *u, const uint8_t *v,
         const uint8_t *src_uv = v ? v : y + (size_t)pitch_y * (size_t)h;
         int src_uv_pitch = pitch_uv ? pitch_uv : pitch_y;
         if (s_use_bgra) {
-            int rows = h < s_buf_h ? h : s_buf_h;
-            nv12_to_bgra(dst, s_pitch, w, rows, y, src_uv, pitch_y, src_uv_pitch);
+            /* Scale to fill the whole registered buffer (display resolution)
+             * instead of clipping to min(h, s_buf_h): otherwise streaming at
+             * e.g. 720p onto a 1080p output only fills the top-left corner. */
+            nv12_to_bgra(dst, s_pitch, w, h, s_width, s_buf_h, y, src_uv, pitch_y, src_uv_pitch);
         } else {
             nv12_blit_copy(dst, s_pitch, s_buf_h, y, pitch_y, h, w, s_ycc_hrep4);
             (void)src_uv;
             (void)src_uv_pitch;
         }
     } else {
-        int rows = h < s_buf_h ? h : s_buf_h;
         if (s_use_bgra) {
-            yuv_to_bgra(dst, s_pitch, w, rows, y, u, v, pitch_y, pitch_uv, pitch_uv);
+            if (w == s_width && h == s_buf_h) {
+                yuv_to_bgra(dst, s_pitch, w, h, y, u, v, pitch_y, pitch_uv, pitch_uv);
+            } else {
+                const int *lut = scale_lut_get(s_width, w);
+                if (lut) {
+                    yuv_to_bgra_scaled(dst, s_pitch, s_width, s_buf_h, y, u, v,
+                                       pitch_y, pitch_uv, pitch_uv, w, h, lut);
+                } else {
+                    int rows = h < s_buf_h ? h : s_buf_h;
+                    int cols = w < s_width ? w : s_width;
+                    yuv_to_bgra(dst, s_pitch, cols, rows, y, u, v, pitch_y, pitch_uv, pitch_uv);
+                }
+            }
         } else {
+            int rows = h < s_buf_h ? h : s_buf_h;
             pack_yuv420p_to_nv12(dst, s_pitch, w, rows, y, u, v, pitch_y, pitch_uv, pitch_uv);
         }
     }

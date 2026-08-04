@@ -89,6 +89,7 @@ enum {
     SET_PREFER_HW,
     SET_PREFER_YCBCR,
     SET_FILE_LOG,
+    SET_SHOW_STATS,
     SET_COUNT,
 };
 
@@ -103,6 +104,7 @@ static const char *k_set_names[SET_COUNT] = {
     "Decoder HW",
     "YCbCr (experimental)",
     "File logging",
+    "Perf overlay",
 };
 
 /* On-screen keyboard 4x10. */
@@ -218,6 +220,7 @@ static void set_value_str(const ui_state_t *st, int row, char *out, size_t cap) 
     case SET_PREFER_HW:   snprintf(out, cap, "%s", c->prefer_hw ? "yes" : "no"); break;
     case SET_PREFER_YCBCR:snprintf(out, cap, "%s", c->prefer_ycbcr ? "yes" : "no"); break;
     case SET_FILE_LOG:    snprintf(out, cap, "%s", c->enable_file_log ? "yes" : "no"); break;
+    case SET_SHOW_STATS:  snprintf(out, cap, "%s", c->show_stats ? "yes" : "no"); break;
     default: out[0] = '\0'; break;
     }
 }
@@ -387,6 +390,7 @@ static void settings_input(ui_state_t *st, unsigned pr) {
             log_set_file_enabled(c->enable_file_log ? 1 : 0, path);
         }
         break;
+    case SET_SHOW_STATS:  c->show_stats = !c->show_stats; break;
     default: changed = 0; break;
     }
     if (changed)

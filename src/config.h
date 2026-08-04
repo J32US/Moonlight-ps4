@@ -21,7 +21,19 @@ typedef struct {
     bool videodec2_spike;
     bool prefer_ycbcr;
     bool enable_file_log; // writes /data/moonlight/debug.log
+    bool show_stats; // on-screen perf overlay (FPS/decode/convert/present/KB per frame)
     bool paired_ok; // runtime only
+
+    /* Videodec2 tuning, A/B-able on console without a rebuild. Rev-2 defaults
+     * (depth=2 + AU ONION) are the fast path; files with cfg_rev < 2 get them
+     * re-applied on load. See docs/CONSOLE_VALIDATE.md. */
+    int dec_pipeline_depth; // frames in flight inside Videodec2 (1..VIDEODEC2_MAX_FB)
+    int dec_thread_prio;    // Orbis priority of the Vdec CPU worker (lower = higher)
+    int slices_per_frame;   // CAPABILITY_SLICES_PER_FRAME asked of the host
+    bool dec_au_onion;      // AU bitstream in cacheable ONION (false = WC_GARLIC)
+    bool dec_fb_garlic;     // force decoder framebuffer to WC_GARLIC (skip ONION alias)
+    int bgra_workers;       // NV12->BGRA convert threads (1..6)
+    int bgra_nt;            // -1 auto, 0 cached stores, 1 streaming stores
 } app_config_t;
 
 void config_set_defaults(app_config_t *cfg);
