@@ -23,7 +23,7 @@
 #define CONFIG_DIR "."
 #endif
 
-#define VERSION_STR "1.0.7"
+#define VERSION_STR "1.1.0"
 
 static void read_line_file(const char *path, char *out, size_t outlen) {
     out[0] = '\0';
