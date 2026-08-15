@@ -10,29 +10,23 @@ Full port plan: [PLAN.md](PLAN.md).
 
 ## Status
 
-### Iteration 1 — playable software client
+Playable client for jailbroken PS4 (GoldHEN / FW 9.00 validated):
 
-- [x] Phase 0: toolchain, CMake, hello-world `.pkg`, UDP logging
-- [x] Phase 1: protocol core (pairing, applist, launch, streaming) validated on Linux against Sunshine
-- [x] Phase 2: PS4 platform layer for moonlight-common-c
-- [x] Phase 3: audio (Opus + `sceAudioOut`)
-- [x] Phase 4: software video (FFmpeg H.264 + `sceVideoOut`)
-- [x] Phase 5: input (`scePad`, DualShock 4)
-- [x] Phase 7 (partial): INI config + on-console UI menu (APPS / SETTINGS + on-screen keyboard); packaging `.pkg`
+- [x] Pairing, applist, launch, and H.264 streaming against Sunshine
+- [x] Audio (Opus + `sceAudioOut`)
+- [x] Software video (FFmpeg) and hardware decode (`libSceVideodec2`, `prefer_hw`)
+- [x] DualShock 4 input (`scePad`)
+- [x] On-console UI (APPS / SETTINGS + on-screen keyboard) and INI config
+- [x] Installable `.pkg` (`CATEGORY=gd`)
+- [x] Optional performance overlay and Videodec2 / BGRA tuning knobs
 
+### TODO
 
-
-### Iteration 2 — Faster
-
-- [x] Native YCbCr/NV12 presentation on `sceVideoOut` (optional; experimental)
-- [x] Hardware decoder via `libSceVideodec2` (`prefer_hw` in INI; always compiled in)
-- [x] On-console UI menu with applist, settings, pairing PIN screen
-- [ ] Broader console validation (see `[docs/CONSOLE_VALIDATE.md](docs/CONSOLE_VALIDATE.md)`)
+- [ ] Keyboard and mouse support
 - [ ] mDNS host discovery
-- [ ] Advanced frame pacing (`presentationTimeUs` / `rtpTimestamp`)
-- [ ] Upstream `__ORBIS__` to moonlight-common-c
+- [ ] Native YCbCr/NV12 presentation on `sceVideoOut`
 
-
+Full port plan and longer backlog: [PLAN.md](PLAN.md). Validation notes: [docs/CONSOLE_VALIDATE.md](docs/CONSOLE_VALIDATE.md).
 
 ## Requirements (development)
 
