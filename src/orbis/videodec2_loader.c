@@ -784,160 +784,141 @@ out:
     if (cg_m) sceKernelReleaseDirectMemory(cg_o, cg_s);
 }
 
-/* Round 21 (2026-08-20): Netflix EXACT queue. The codec-module gate
- * ([0xc61d8], a GP-DEC/gpvdec service call) receives the compute queue in
- * the instance; the queue is the one variable never matched to Netflix.
- * Netflix's SonyHevcVideoDecoder allocates its queue with computePipeId=2,
- * computeQueueId=2, checkMemoryType=1 (thisSize 0x10) — our allocator only
- * tried {0,0},{0,1},{1,0},{1,1},{2,0}... and stopped at {0,0}. Allocate the
- * Netflix queue, then run the FULL Netflix query+create+decode path. */
+/* Round 22 (2026-08-20): APPLE TV config. Apple's eboot (CUSA24386) builds
+ * its videodec2 config with resourceType=1 (EMBEDDED) + codecType=0xee049
+ * (packed as 0xee04900000001 at config+0x08), profile=2 (Main10), dpb=6,
+ * prio=-1, affinity=0, optProg=1, checkMem=0, depth=0 — Netflix paired
+ * 0xee049 with resourceType=0xb6c8 (internal type 4) which the codec-module
+ * gate rejected; Apple's resType=1 maps to internal type 2. Sweep it. */
 static void spike_netflix_probe(const videodec2_api_t *api, const char *label,
                                 const uint8_t *au, size_t au_len) {
-    /* 1) Netflix-exact compute queue: pipe=2 queue=2 checkMemoryType=1 */
-    OrbisVideodec2ComputeMemoryInfo qmi;
-    memset(&qmi, 0, sizeof(qmi));
-    qmi.thisSize = sizeof(qmi);
-    int rcq = api->QueryComputeMemoryInfo(&qmi);
-    LOGI("spike[%s]: QueryComputeMemoryInfo => 0x%08x size=%llu",
-         label, (unsigned)rcq, (unsigned long long)qmi.cpuGpuMemorySize);
-    if (rcq < 0)
-        return;
-    void *q_mem = NULL;
-    off_t q_off = 0;
-    size_t q_sz = 0;
-    if (alloc_dmem((size_t)qmi.cpuGpuMemorySize, ML_DMEM_TYPE_ONION,
-                   &q_mem, &q_off, &q_sz) < 0) {
-        LOGE("spike[%s]: queue mem alloc FAILED", label);
-        return;
+    static const struct {
+        const char *tag;
+        int profile;   /* 1 Main / 2 Main10 */
+        int maxlevel;  /* 0 (Apple leaves 0), 120, 153 */
+        int dpb;
+        int depth;
+    } variants[] = {
+        { "atv-exact",    2, 0,   6, 0 },
+        { "atv-p1-lvl0",  1, 0,   4, 0 },
+        { "atv-p1-lvl120",1, 120, 4, 1 },
+        { "atv-p1-lvl153",1, 153, 4, 1 },
+        { "atv-p2-lvl120",2, 120, 6, 1 },
+        { "atv-p1-lvl123",1, 123, 4, 1 },
+    };
+    char vlabel[64];
+    for (size_t v = 0; v < sizeof(variants) / sizeof(variants[0]); v++) {
+        snprintf(vlabel, sizeof(vlabel), "%s-%s", label, variants[v].tag);
+        OrbisVideodec2DecoderConfigInfo dc;
+        videodec2_fill_decoder_config(&dc, api->queue, 1920, 1080);
+        dc.maxFrameHeight = 1080; /* raw */
+        dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED; /* 1, Apple! */
+        dc.codecType = ORBIS_VIDEODEC2_CODEC_HEVC;                /* 0xee049 */
+        dc.profile = variants[v].profile;
+        dc.maxLevel = variants[v].maxlevel;
+        dc.maxDpbFrameCount = variants[v].dpb;
+        dc.decodePipelineDepth = variants[v].depth;
+        dc.cpuAffinityMask = 0;      /* Apple */
+        dc.cpuThreadPriority = -1;   /* Apple */
+        dc.optimizeProgressiveVideo = true;
+        dc.checkMemoryType = false;  /* Apple */
+
+        OrbisVideodec2DecoderMemoryInfo dm;
+        memset(&dm, 0, sizeof(dm));
+        dm.thisSize = sizeof(dm);
+        int rc = api->QueryDecoderMemoryInfo(&dc, &dm);
+        if (rc != 0) {
+            LOGI("spike[%s]: Query(res=1 codec=0xee049 prof=%d lvl=%d dpb=%d "
+                 "depth=%d) => 0x%08x (skip)",
+                 vlabel, variants[v].profile, variants[v].maxlevel,
+                 variants[v].dpb, variants[v].depth, (unsigned)rc);
+            continue;
+        }
+        LOGI("spike[%s]: QUERY OK prof=%d lvl=%d dpb=%d cpu=%llu gpu=%llu "
+             "cpuGpu=%llu fb=%llu",
+             vlabel, variants[v].profile, variants[v].maxlevel,
+             variants[v].dpb,
+             (unsigned long long)dm.cpuMemorySize,
+             (unsigned long long)dm.gpuMemorySize,
+             (unsigned long long)dm.cpuGpuMemorySize,
+             (unsigned long long)dm.maxFrameBufferSize);
+
+        void *cpu_m = NULL, *gpu_m = NULL, *cg_m = NULL;
+        off_t cpu_o = 0, gpu_o = 0, cg_o = 0;
+        size_t cpu_s = 0, gpu_s = 0, cg_s = 0;
+        if ((dm.cpuMemorySize &&
+             alloc_dmem((size_t)dm.cpuMemorySize, ML_DMEM_TYPE_ONION,
+                        &cpu_m, &cpu_o, &cpu_s) < 0) ||
+            (dm.gpuMemorySize &&
+             alloc_dmem((size_t)dm.gpuMemorySize, ML_DMEM_TYPE_GARLIC,
+                        &gpu_m, &gpu_o, &gpu_s) < 0) ||
+            (dm.cpuGpuMemorySize &&
+             alloc_dmem((size_t)dm.cpuGpuMemorySize, ML_DMEM_TYPE_ONION,
+                        &cg_m, &cg_o, &cg_s) < 0)) {
+            LOGE("spike[%s]: alloc FAILED", label);
+            continue;
+        }
+        dm.cpuMemory = cpu_m;
+        dm.gpuMemory = gpu_m;
+        dm.cpuGpuMemory = cg_m;
+
+        OrbisVideodec2Decoder dec = NULL;
+        int rc2 = api->CreateDecoder(&dc, &dm, &dec);
+        if (!dec || rc2 != 0) {
+            LOGI("spike[%s]: CreateDecoder => 0x%08x", vlabel, (unsigned)rc2);
+            if (cpu_m) sceKernelReleaseDirectMemory(cpu_o, cpu_s);
+            if (gpu_m) sceKernelReleaseDirectMemory(gpu_o, gpu_s);
+            if (cg_m) sceKernelReleaseDirectMemory(cg_o, cg_s);
+            continue;
+        }
+        LOGI("spike[%s]: CreateDecoder OK handle=%p — resType=1 + 0xee049",
+             vlabel, (void *)dec);
+
+        void *fb_m = NULL;
+        off_t fb_o = 0;
+        size_t fb_s = 0;
+        if (dm.maxFrameBufferSize &&
+            (fb_m = spike_alloc_fb2((size_t)dm.maxFrameBufferSize,
+                                    &fb_o, &fb_s)) == NULL) {
+            LOGE("spike[%s]: fb alloc FAILED", vlabel);
+            goto out22;
+        }
+        OrbisVideodec2FrameBuffer fb;
+        memset(&fb, 0, sizeof(fb));
+        fb.thisSize = sizeof(fb);
+        fb.frameBuffer = fb_m;
+        fb.frameBufferSize = (uint64_t)fb_s;
+
+        OrbisVideodec2OutputInfo out;
+        memset(&out, 0, sizeof(out));
+        out.thisSize = sizeof(out);
+
+        void *au_m = NULL;
+        off_t au_o = 0;
+        size_t au_s = 0;
+        if (alloc_dmem(au_len, ML_DMEM_TYPE_ONION, &au_m, &au_o, &au_s) < 0) {
+            LOGE("spike[%s]: AU alloc FAILED", vlabel);
+            goto out22;
+        }
+        memcpy(au_m, au, au_len);
+        OrbisVideodec2InputData in;
+        memset(&in, 0, sizeof(in));
+        in.thisSize = sizeof(in);
+        in.auData = au_m;
+        in.auSize = (uint64_t)au_len;
+        in.ptsData = 0;
+        in.dtsData = 0;
+        int rc3 = api->Decode(dec, &in, &fb, &out);
+        LOGI("spike[%s]: Decode (%zuB) => 0x%08x", vlabel, au_len, (unsigned)rc3);
+        sceKernelReleaseDirectMemory(au_o, au_s);
+out22:
+        if (fb_m) sceKernelReleaseDirectMemory(fb_o, fb_s);
+        if (api->DeleteDecoder)
+            api->DeleteDecoder(dec);
+        if (cpu_m) sceKernelReleaseDirectMemory(cpu_o, cpu_s);
+        if (gpu_m) sceKernelReleaseDirectMemory(gpu_o, gpu_s);
+        if (cg_m) sceKernelReleaseDirectMemory(cg_o, cg_s);
     }
-    qmi.cpuGpuMemory = q_mem;
-
-    OrbisVideodec2ComputeConfigInfo ci;
-    memset(&ci, 0, sizeof(ci));
-    ci.thisSize = sizeof(ci);
-    ci.computePipeId = 2;
-    ci.computeQueueId = 2;
-    ci.checkMemoryType = true;
-
-    OrbisVideodec2ComputeQueue q = NULL;
-    int rcqa = api->AllocateComputeQueue(&ci, &qmi, &q);
-    LOGI("spike[%s]: AllocateComputeQueue pipe=2 queue=2 cm=1 => 0x%08x q=%p",
-         label, (unsigned)rcqa, q);
-    if (rcqa != 0 || !q) {
-        sceKernelReleaseDirectMemory(q_off, q_sz);
-        return;
-    }
-
-    /* 2) Netflix config + query */
-    OrbisVideodec2DecoderConfigInfo dc;
-    videodec2_fill_decoder_config(&dc, q, 1920, 1080);
-    dc.maxFrameHeight = 1080; /* raw */
-    dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_HEVC; /* 0xb6c8 */
-    dc.codecType = ORBIS_VIDEODEC2_CODEC_HEVC;            /* 0xee049 */
-    dc.profile = 1;
-    dc.maxLevel = 120;
-    dc.maxDpbFrameCount = 4;
-    dc.decodePipelineDepth = 1;
-    dc.cpuAffinityMask = 0x3F;
-    dc.cpuThreadPriority = 700;
-    dc.optimizeProgressiveVideo = true;
-    dc.checkMemoryType = false;
-
-    OrbisVideodec2DecoderMemoryInfo dm;
-    memset(&dm, 0, sizeof(dm));
-    dm.thisSize = sizeof(dm);
-    int rc = api->QueryDecoderMemoryInfo(&dc, &dm);
-    if (rc != 0) {
-        LOGI("spike[%s]: Query(pipe2/queue2 cfg) => 0x%08x (skip)",
-             label, (unsigned)rc);
-        goto outq;
-    }
-    LOGI("spike[%s]: QUERY OK (Netflix queue) cpu=%llu gpu=%llu cpuGpu=%llu fb=%llu",
-         label,
-         (unsigned long long)dm.cpuMemorySize,
-         (unsigned long long)dm.gpuMemorySize,
-         (unsigned long long)dm.cpuGpuMemorySize,
-         (unsigned long long)dm.maxFrameBufferSize);
-
-    /* 3) alloc decoder memories + create */
-    void *cpu_m = NULL, *gpu_m = NULL, *cg_m = NULL;
-    off_t cpu_o = 0, gpu_o = 0, cg_o = 0;
-    size_t cpu_s = 0, gpu_s = 0, cg_s = 0;
-    if ((dm.cpuMemorySize &&
-         alloc_dmem((size_t)dm.cpuMemorySize, ML_DMEM_TYPE_ONION,
-                    &cpu_m, &cpu_o, &cpu_s) < 0) ||
-        (dm.gpuMemorySize &&
-         alloc_dmem((size_t)dm.gpuMemorySize, ML_DMEM_TYPE_GARLIC,
-                    &gpu_m, &gpu_o, &gpu_s) < 0) ||
-        (dm.cpuGpuMemorySize &&
-         alloc_dmem((size_t)dm.cpuGpuMemorySize, ML_DMEM_TYPE_ONION,
-                    &cg_m, &cg_o, &cg_s) < 0)) {
-        LOGE("spike[%s]: alloc FAILED", label);
-        goto outq;
-    }
-    dm.cpuMemory = cpu_m;
-    dm.gpuMemory = gpu_m;
-    dm.cpuGpuMemory = cg_m;
-
-    OrbisVideodec2Decoder dec = NULL;
-    int rc2 = api->CreateDecoder(&dc, &dm, &dec);
-    if (!dec || rc2 != 0) {
-        LOGI("spike[%s]: CreateDecoder(Netflix queue) => 0x%08x",
-             label, (unsigned)rc2);
-        goto outq;
-    }
-    LOGI("spike[%s]: CreateDecoder OK handle=%p — HEVC + Netflix queue",
-         label, (void *)dec);
-
-    /* 4) feed the file AU */
-    void *fb_m = NULL;
-    off_t fb_o = 0;
-    size_t fb_s = 0;
-    if (dm.maxFrameBufferSize &&
-        (fb_m = spike_alloc_fb2((size_t)dm.maxFrameBufferSize,
-                                &fb_o, &fb_s)) == NULL) {
-        LOGE("spike[%s]: fb alloc FAILED", label);
-        goto outq;
-    }
-    OrbisVideodec2FrameBuffer fb;
-    memset(&fb, 0, sizeof(fb));
-    fb.thisSize = sizeof(fb);
-    fb.frameBuffer = fb_m;
-    fb.frameBufferSize = (uint64_t)fb_s;
-
-    OrbisVideodec2OutputInfo out;
-    memset(&out, 0, sizeof(out));
-    out.thisSize = sizeof(out);
-
-    void *au_m = NULL;
-    off_t au_o = 0;
-    size_t au_s = 0;
-    if (alloc_dmem(au_len, ML_DMEM_TYPE_ONION, &au_m, &au_o, &au_s) < 0) {
-        LOGE("spike[%s]: AU alloc FAILED", label);
-        goto outq;
-    }
-    memcpy(au_m, au, au_len);
-    OrbisVideodec2InputData in;
-    memset(&in, 0, sizeof(in));
-    in.thisSize = sizeof(in);
-    in.auData = au_m;
-    in.auSize = (uint64_t)au_len;
-    in.ptsData = 0;
-    in.dtsData = 0;
-    int rc3 = api->Decode(dec, &in, &fb, &out);
-    LOGI("spike[%s]: Decode (%zuB) => 0x%08x", label, au_len, (unsigned)rc3);
-    sceKernelReleaseDirectMemory(au_o, au_s);
-
-    if (fb_m)
-        sceKernelReleaseDirectMemory(fb_o, fb_s);
-    if (api->DeleteDecoder)
-        api->DeleteDecoder(dec);
-outq:
-    if (cpu_m) sceKernelReleaseDirectMemory(cpu_o, cpu_s);
-    if (gpu_m) sceKernelReleaseDirectMemory(gpu_o, gpu_s);
-    if (cg_m) sceKernelReleaseDirectMemory(cg_o, cg_s);
-    if (q) api->ReleaseComputeQueue(q);
-    if (q_mem) sceKernelReleaseDirectMemory(q_off, q_sz);
 }
 
 /* Round 12: structural variants + the AVC control. flags:
