@@ -4,6 +4,8 @@
 #include "../log.h"
 
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <orbis/libkernel.h>
 #include <orbis/Sysmodule.h>
 
@@ -603,6 +605,53 @@ int videodec2_spike_run(void) {
     if (videodec2_load(&api) != 0) {
         LOGE("VD2 FAIL load");
         return -1;
+    }
+
+    /* Dump the loaded module image so the HEVC Decode path can be RE'd
+     * offline (the universal 0x811d0303 needs ground truth, not guesses). */
+    if (api.module >= 0) {
+        OrbisKernelModuleInfo mi;
+        memset(&mi, 0, sizeof(mi));
+        mi.size = sizeof(mi);
+        int mrc = sceKernelGetModuleInfo((OrbisKernelModule)api.module, &mi);
+        LOGI("videodec2: GetModuleInfo => 0x%08x segs=%u name='%s'",
+             (unsigned)mrc, mi.segmentCount, mi.name);
+        LOGI("videodec2: CreateHevcDecoder=%p Decode=%p QueryHevc=%p",
+             (void *)api.CreateHevcDecoder, (void *)api.Decode,
+             (void *)api.QueryHevcDecoderMemoryInfo);
+        if (mrc == 0 && mi.segmentCount > 0 && mi.segmentCount <= 4) {
+            uintptr_t lo = (uintptr_t)-1, hi = 0;
+            for (uint32_t i = 0; i < mi.segmentCount; i++) {
+                uintptr_t a = (uintptr_t)mi.segmentInfo[i].address;
+                uintptr_t b = a + mi.segmentInfo[i].size;
+                LOGI("videodec2:   seg[%u] addr=0x%lx size=0x%x prot=%d", i,
+                     (unsigned long)a, mi.segmentInfo[i].size,
+                     mi.segmentInfo[i].prot);
+                if (a < lo) lo = a;
+                if (b > hi) hi = b;
+            }
+            if (hi > lo) {
+                size_t total = (size_t)(hi - lo);
+                uint8_t *blob = malloc(total);
+                if (blob) {
+                    memset(blob, 0, total);
+                    for (uint32_t i = 0; i < mi.segmentCount; i++) {
+                        uintptr_t a = (uintptr_t)mi.segmentInfo[i].address;
+                        memcpy(blob + (a - lo), (const void *)a,
+                               mi.segmentInfo[i].size);
+                    }
+                    FILE *f = fopen("/data/moonlight/vdec2_blob.bin", "wb");
+                    if (f) {
+                        size_t wr = fwrite(blob, 1, total, f);
+                        fclose(f);
+                        LOGI("videodec2: dumped %zu bytes -> /data/moonlight/vdec2_blob.bin", wr);
+                    } else {
+                        LOGE("videodec2: fopen dump FAILED");
+                    }
+                    free(blob);
+                }
+            }
+        }
     }
 
     int rc = alloc_compute_queue(&api);
