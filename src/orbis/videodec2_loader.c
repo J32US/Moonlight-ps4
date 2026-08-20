@@ -764,25 +764,43 @@ int videodec2_spike_run(void) {
                          ORBIS_VIDEODEC2_PROFILE_HIGH, ORBIS_VIDEODEC2_LEVEL_51,
                          ORBIS_VIDEODEC2_DPB_HEVC_4K, 3840, 2160);
 
-        /* Round 8: codecType sweep on the HEVC entry point. The r1
-         * "codecType=2 is dead" result came from the GENERIC CreateDecoder;
-         * CreateHevcDecoder with codecType=2 was never tested. If the
-         * decoder instance parses NALs per the codecType field, ct=1 (AVC)
-         * rejects every HEVC NAL as INVALID_SEQUENCE — which would explain
-         * the universal 0x811d0303 across all of rounds 6-7. */
-        LOGI("=== videodec2 spike: decode acceptance matrix (r8) ===");
-        spike_hevc_au_probe(&api, "ct1-100/51", 1, 100, 51, 4,
+        /* Round 10: full variant matrix WITH the codec modules loaded
+         * (rounds 6-7 ran with SHEVC absent — results were meaningless).
+         * The first non-0x811d0303 row pinpoints what the codec rejects. */
+        LOGI("=== videodec2 spike: decode acceptance matrix (r10) ===");
+        spike_hevc_au_probe(&api, "real", 1, 100, 51, 4,
                             spike_au_real, sizeof(spike_au_real));
-        spike_hevc_au_probe(&api, "ct2-100/51", 2, 100, 51, 4,
-                            spike_au_real, sizeof(spike_au_real));
-        spike_hevc_au_probe(&api, "ct2-1/123", 2, 1, 123, 4,
-                            spike_au_real, sizeof(spike_au_real));
-        spike_hevc_au_probe(&api, "ct2-1/153", 2, 1, 153, 4,
-                            spike_au_real, sizeof(spike_au_real));
-        spike_hevc_au_probe(&api, "ct2-2/153", 2, 2, 153, 4,
-                            spike_au_real, sizeof(spike_au_real));
-        spike_hevc_au_probe(&api, "ct2-100/51/dpb3", 2, 100, 51, 3,
-                            spike_au_real, sizeof(spike_au_real));
+        spike_hevc_au_probe(&api, "tier0", 1, 100, 51, 4,
+                            spike_au_tier0, sizeof(spike_au_tier0));
+        spike_hevc_au_probe(&api, "lvl153", 1, 100, 51, 4,
+                            spike_au_lvl153, sizeof(spike_au_lvl153));
+        spike_hevc_au_probe(&api, "lvl51", 1, 100, 51, 4,
+                            spike_au_lvl51, sizeof(spike_au_lvl51));
+        spike_hevc_au_probe(&api, "tmvp0", 1, 100, 51, 4,
+                            spike_au_tmvp0, sizeof(spike_au_tmvp0));
+        spike_hevc_au_probe(&api, "novui", 1, 100, 51, 4,
+                            spike_au_novui, sizeof(spike_au_novui));
+        spike_hevc_au_probe(&api, "notiming", 1, 100, 51, 4,
+                            spike_au_notiming, sizeof(spike_au_notiming));
+        spike_hevc_au_probe(&api, "min", 1, 100, 51, 4,
+                            spike_au_min, sizeof(spike_au_min));
+        spike_hevc_au_probe(&api, "lenpref", 1, 100, 51, 4,
+                            spike_au_lp, sizeof(spike_au_lp));
+        spike_hevc_au_probe(&api, "novps", 1, 100, 51, 4,
+                            spike_au_novps, sizeof(spike_au_novps));
+        spike_hevc_au_probe(&api, "VPS-only", 1, 100, 51, 4,
+                            spike_nal_vps, sizeof(spike_nal_vps));
+        spike_hevc_au_probe(&api, "SPS-only", 1, 100, 51, 4,
+                            spike_nal_sps, sizeof(spike_nal_sps));
+        spike_hevc_au_probe(&api, "PPS-only", 1, 100, 51, 4,
+                            spike_nal_pps, sizeof(spike_nal_pps));
+        {
+            const uint8_t *seq[3] = { spike_nal_vps, spike_nal_sps, spike_nal_pps };
+            const size_t seql[3] = { sizeof(spike_nal_vps), sizeof(spike_nal_sps),
+                                     sizeof(spike_nal_pps) };
+            spike_hevc_feed_probe(&api, "seq-VPS/SPS/PPS", 1, 100, 51, 4,
+                                  seq, seql, 3);
+        }
         LOGI("=== videodec2 spike: decode acceptance DONE ===");
     }
 
