@@ -489,6 +489,8 @@ static const uint8_t spike_nal_pps[6] = {
 };
 
 static void spike_hevc_feed_probe(const videodec2_api_t *api, const char *label,
+                                  uint32_t createCodecType, uint32_t createProfile,
+                                  uint32_t createLevel, int createDpb,
                                   const uint8_t *const *aus, const size_t *lens,
                                   int n) {
     OrbisVideodec2DecoderConfigInfo dc;
@@ -526,10 +528,17 @@ static void spike_hevc_feed_probe(const videodec2_api_t *api, const char *label,
     dm.gpuMemory = gpu_m;
     dm.cpuGpuMemory = cg_m;
 
+    dc.codecType = createCodecType;
+    dc.profile = createProfile;
+    dc.maxLevel = createLevel;
+    dc.maxDpbFrameCount = createDpb;
+
     OrbisVideodec2Decoder dec = NULL;
     int rc2 = api->CreateHevcDecoder(&dc, &dm, &dec);
     if (!dec || rc2 != 0) {
-        LOGI("spike[%s]: CreateHevcDecoder => 0x%08x", label, (unsigned)rc2);
+        LOGI("spike[%s]: CreateHevcDecoder(ct=%u prof=%u lvl=%u dpb=%d) => 0x%08x",
+             label, (unsigned)createCodecType, (unsigned)createProfile,
+             (unsigned)createLevel, createDpb, (unsigned)rc2);
         goto out;
     }
 
@@ -579,10 +588,13 @@ out:
 }
 
 static void spike_hevc_au_probe(const videodec2_api_t *api, const char *label,
+                                uint32_t codecType, uint32_t profile,
+                                uint32_t level, int dpb,
                                 const uint8_t *au, size_t au_len) {
     const uint8_t *aus[1] = { au };
     const size_t lens[1] = { au_len };
-    spike_hevc_feed_probe(api, label, aus, lens, 1);
+    spike_hevc_feed_probe(api, label, codecType, profile, level, dpb,
+                          aus, lens, 1);
 }
 
 int videodec2_spike_run(void) {
@@ -657,29 +669,25 @@ int videodec2_spike_run(void) {
                          ORBIS_VIDEODEC2_PROFILE_HIGH, ORBIS_VIDEODEC2_LEVEL_51,
                          ORBIS_VIDEODEC2_DPB_HEVC_4K, 3840, 2160);
 
-        /* Round 7: decode-acceptance matrix — feed the captured NVENC
-         * VPS/SPS/PPS (and bit-patched SPS variants) to the validated
-         * create config and find what videodec2 accepts. */
-        LOGI("=== videodec2 spike: decode acceptance matrix (r7) ===");
-        spike_hevc_au_probe(&api, "real", spike_au_real, sizeof(spike_au_real));
-        spike_hevc_au_probe(&api, "tier0", spike_au_tier0, sizeof(spike_au_tier0));
-        spike_hevc_au_probe(&api, "lvl153", spike_au_lvl153, sizeof(spike_au_lvl153));
-        spike_hevc_au_probe(&api, "lvl51", spike_au_lvl51, sizeof(spike_au_lvl51));
-        spike_hevc_au_probe(&api, "tmvp0", spike_au_tmvp0, sizeof(spike_au_tmvp0));
-        spike_hevc_au_probe(&api, "novui", spike_au_novui, sizeof(spike_au_novui));
-        spike_hevc_au_probe(&api, "notiming", spike_au_notiming, sizeof(spike_au_notiming));
-        spike_hevc_au_probe(&api, "min", spike_au_min, sizeof(spike_au_min));
-        spike_hevc_au_probe(&api, "lenpref", spike_au_lp, sizeof(spike_au_lp));
-        spike_hevc_au_probe(&api, "novps", spike_au_novps, sizeof(spike_au_novps));
-        spike_hevc_au_probe(&api, "VPS-only", spike_nal_vps, sizeof(spike_nal_vps));
-        spike_hevc_au_probe(&api, "SPS-only", spike_nal_sps, sizeof(spike_nal_sps));
-        spike_hevc_au_probe(&api, "PPS-only", spike_nal_pps, sizeof(spike_nal_pps));
-        {
-            const uint8_t *seq[3] = { spike_nal_vps, spike_nal_sps, spike_nal_pps };
-            const size_t seql[3] = { sizeof(spike_nal_vps), sizeof(spike_nal_sps),
-                                     sizeof(spike_nal_pps) };
-            spike_hevc_feed_probe(&api, "seq-VPS/SPS/PPS", seq, seql, 3);
-        }
+        /* Round 8: codecType sweep on the HEVC entry point. The r1
+         * "codecType=2 is dead" result came from the GENERIC CreateDecoder;
+         * CreateHevcDecoder with codecType=2 was never tested. If the
+         * decoder instance parses NALs per the codecType field, ct=1 (AVC)
+         * rejects every HEVC NAL as INVALID_SEQUENCE — which would explain
+         * the universal 0x811d0303 across all of rounds 6-7. */
+        LOGI("=== videodec2 spike: decode acceptance matrix (r8) ===");
+        spike_hevc_au_probe(&api, "ct1-100/51", 1, 100, 51, 4,
+                            spike_au_real, sizeof(spike_au_real));
+        spike_hevc_au_probe(&api, "ct2-100/51", 2, 100, 51, 4,
+                            spike_au_real, sizeof(spike_au_real));
+        spike_hevc_au_probe(&api, "ct2-1/123", 2, 1, 123, 4,
+                            spike_au_real, sizeof(spike_au_real));
+        spike_hevc_au_probe(&api, "ct2-1/153", 2, 1, 153, 4,
+                            spike_au_real, sizeof(spike_au_real));
+        spike_hevc_au_probe(&api, "ct2-2/153", 2, 2, 153, 4,
+                            spike_au_real, sizeof(spike_au_real));
+        spike_hevc_au_probe(&api, "ct2-100/51/dpb3", 2, 100, 51, 3,
+                            spike_au_real, sizeof(spike_au_real));
         LOGI("=== videodec2 spike: decode acceptance DONE ===");
     }
 
