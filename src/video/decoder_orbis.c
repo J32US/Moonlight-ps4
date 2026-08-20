@@ -408,11 +408,18 @@ static int query_decoder_mem(int w, int h, int is_hevc,
      * universal 0x811d0303. Profile 1 (Main), maxLevel 120 (L4.0) /
      * 153 (L5.1) per Netflix's SonyHevcVideoDecoder::create. */
     if (is_hevc) {
-        dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_HEVC;
+        /* Round 23 (2026-08-20): WORKING cell, console-verified. Apple TV
+         * (CUSA24386) uses resourceType=1 (EMBEDDED) + codecType=0xee049 —
+         * Netflix's 0xb6c8 (internal type 4) is rejected by the codec-module
+         * gate; resType=1 (internal type 2) passes. Decode 0x00000000 on the
+         * full x265 AU. dpb must match query: 4 @1080p, 6 @4K. */
+        dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED;
         dc.codecType = ORBIS_VIDEODEC2_CODEC_HEVC;
         dc.profile = 1;
         dc.maxLevel = (h >= 1089) ? 153 : 120;
-        dc.maxDpbFrameCount = -1;
+        dc.maxDpbFrameCount = (w >= 3840) ? 6 : 4;
+        dc.cpuAffinityMask = 0;
+        dc.cpuThreadPriority = -1;
     }
 
     memset(dm, 0, sizeof(*dm));
@@ -604,11 +611,14 @@ static int dr_setup(int videoFormat, int width, int height, int redrawRate,
     /* Round 17: Netflix routing values (see query_decoder_mem) — MUST match
      * the query config exactly (memory sizes depend on it). */
     if (is_hevc) {
-        dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_HEVC;
+        /* Round 23: working cell (must match query_decoder_mem exactly). */
+        dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED;
         dc.codecType = ORBIS_VIDEODEC2_CODEC_HEVC;
         dc.profile = 1;
         dc.maxLevel = (height >= 1089) ? 153 : 120;
-        dc.maxDpbFrameCount = -1;
+        dc.maxDpbFrameCount = (width >= 3840) ? 6 : 4;
+        dc.cpuAffinityMask = 0;
+        dc.cpuThreadPriority = -1;
     }
 
     int rc = s_api.CreateDecoder(&dc, &dm, &s_dec);
