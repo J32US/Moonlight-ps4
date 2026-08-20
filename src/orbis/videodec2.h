@@ -7,16 +7,20 @@
 #include <string.h>
 
 #define ORBIS_VIDEODEC2_CODEC_AVC 1
-#define ORBIS_VIDEODEC2_CODEC_HEVC 2 /* UNVERIFIED on console — Task 1.3 spike */
+#define ORBIS_VIDEODEC2_CODEC_HEVC 2 /* logical id; struct field stays 1 (validated) */
 
 // Validated on console: resourceType=0 → 0x811D0203; without profile/level → 0x811D0205;
 // cpuThreadPriority=16 → 0x811D0208.
 #define ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED 1u
 #define ORBIS_VIDEODEC2_PROFILE_HIGH           100u
 #define ORBIS_VIDEODEC2_LEVEL_51               51u
-#define ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN      200u /* UNVERIFIED — spike */
-#define ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN10    202u /* UNVERIFIED — spike */
-#define ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51      153u /* HEVC L5.1 = 4K60 */
+/* FW 12.00 console-validated (2026-08-20): HEVC uses the SAME struct values
+ * as AVC — codecType=1, profile=100, level=51. The decoder type is selected
+ * by the entry point (sceVideodec2CreateHevcDecoder), NOT the fields.
+ * Main10 value still unverified (Phase 3 spike: try 102/202). */
+#define ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN      100u /* == PROFILE_HIGH */
+#define ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN10    202u /* UNVERIFIED — Phase 3 */
+#define ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51      51u  /* == LEVEL_51 (AVC-style) */
 #define ORBIS_VIDEODEC2_DPB_DEFAULT            4    /* AVC + 1080p HEVC */
 #define ORBIS_VIDEODEC2_DPB_HEVC_4K            6    /* HEVC L5.1 4K min DPB */
 #define ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT    700
@@ -113,7 +117,8 @@ static inline void videodec2_fill_decoder_config_ex(OrbisVideodec2DecoderConfigI
                                                     OrbisVideodec2ComputeQueue q,
                                                     int w, int h,
                                                     int pipelineDepth, int cpuPriority,
-                                                    uint32_t codecType, uint32_t profile) {
+                                                    uint32_t codecType, uint32_t profile,
+                                                    int is_hevc) {
     if (pipelineDepth < 1)
         pipelineDepth = 1;
     if (pipelineDepth > ORBIS_VIDEODEC2_MAX_PIPELINE_DEPTH)
@@ -126,14 +131,13 @@ static inline void videodec2_fill_decoder_config_ex(OrbisVideodec2DecoderConfigI
     dc->resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED;
     dc->codecType = codecType;
     dc->profile = profile;
-    /* HEVC level_idc is 3-digit (L5.1 = 153); AVC is 2-digit (5.1 = 51). */
-    dc->maxLevel = (codecType == ORBIS_VIDEODEC2_CODEC_HEVC)
-        ? ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51 : ORBIS_VIDEODEC2_LEVEL_51;
+    /* Validated: HEVC carries AVC-style values (codec=1, prof=100, lvl=51). */
+    dc->maxLevel = ORBIS_VIDEODEC2_LEVEL_51;
     dc->maxFrameWidth = w;
     /* 1088: macroblock-align; 1080 in config → slow Decode / rare paths. */
     dc->maxFrameHeight = (h + 15) & ~15;
     /* dpb=1 + stream with refs → Decode ~150ms and IDR storm. 4 = typical NVENC. */
-    dc->maxDpbFrameCount = (codecType == ORBIS_VIDEODEC2_CODEC_HEVC && w >= 3840)
+    dc->maxDpbFrameCount = (is_hevc && w >= 3840)
         ? ORBIS_VIDEODEC2_DPB_HEVC_4K : ORBIS_VIDEODEC2_DPB_DEFAULT;
     /* depth=1 serialises submit→wait against the compute queue every frame. */
     dc->decodePipelineDepth = (uint32_t)pipelineDepth;
@@ -151,7 +155,7 @@ static inline void videodec2_fill_decoder_config(OrbisVideodec2DecoderConfigInfo
     videodec2_fill_decoder_config_ex(dc, q, w, h, 1,
                                      ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT,
                                      ORBIS_VIDEODEC2_CODEC_AVC,
-                                     ORBIS_VIDEODEC2_PROFILE_HIGH);
+                                     ORBIS_VIDEODEC2_PROFILE_HIGH, 0);
 }
 
 typedef int32_t (*sceVideodec2QueryComputeMemoryInfo_t)(OrbisVideodec2ComputeMemoryInfo *);

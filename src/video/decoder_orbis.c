@@ -387,24 +387,11 @@ static void free_all_dmem(void) {
     s_cpu_sz = s_gpu_sz = s_cpugpu_sz = 0;
 }
 
-static const char *orbis_codec_name(uint32_t codecType) {
-    return codecType == ORBIS_VIDEODEC2_CODEC_HEVC ? "HEVC" : "H.264";
+static const char *orbis_codec_name(int is_hevc) {
+    return is_hevc ? "HEVC" : "H.264";
 }
 
-static void orbis_codec_from_format(uint32_t videoFormat,
-                                    uint32_t *codecType, uint32_t *profile) {
-    if (videoFormat & VIDEO_FORMAT_MASK_H265) {
-        *codecType = ORBIS_VIDEODEC2_CODEC_HEVC;
-        *profile = (videoFormat & VIDEO_FORMAT_MASK_10BIT)
-            ? ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN10
-            : ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN;
-    } else {
-        *codecType = ORBIS_VIDEODEC2_CODEC_AVC;
-        *profile = ORBIS_VIDEODEC2_PROFILE_HIGH;
-    }
-}
-
-static int query_decoder_mem(int w, int h, uint32_t codecType, uint32_t profile,
+static int query_decoder_mem(int w, int h, int is_hevc,
                              OrbisVideodec2DecoderMemoryInfo *dm) {
     /* Must match the CreateDecoder config exactly: memory sizes depend on
      * decodePipelineDepth (querying with depth=1 and creating with 2 would
@@ -412,14 +399,21 @@ static int query_decoder_mem(int w, int h, uint32_t codecType, uint32_t profile,
     OrbisVideodec2DecoderConfigInfo dc;
     videodec2_fill_decoder_config_ex(&dc, s_api.queue, w, h,
                                      s_tune_depth, s_tune_prio,
-                                     codecType, profile);
+                                     ORBIS_VIDEODEC2_CODEC_AVC,
+                                     ORBIS_VIDEODEC2_PROFILE_HIGH, is_hevc);
 
     memset(dm, 0, sizeof(*dm));
     dm->thisSize = sizeof(*dm);
-    int rc = s_api.QueryDecoderMemoryInfo(&dc, dm);
-    LOGI("orbis: QueryDecoderMemoryInfo %dx%d resType=%u prof=%u lvl=%u => 0x%08x "
+    /* HEVC has its own query export (validated on console). */
+    int rc;
+    if (is_hevc && s_api.QueryHevcDecoderMemoryInfo)
+        rc = s_api.QueryHevcDecoderMemoryInfo(&dc, dm);
+    else
+        rc = s_api.QueryDecoderMemoryInfo(&dc, dm);
+    LOGI("orbis: %sQueryDecoderMemoryInfo %dx%d resType=%u prof=%u lvl=%u => 0x%08x "
          "cpu=%llu gpu=%llu cpuGpu=%llu fb=%llu",
-         w, h, dc.resourceType, dc.profile, dc.maxLevel, (unsigned)rc,
+         is_hevc ? "Hevc" : "", w, h, dc.resourceType, dc.profile, dc.maxLevel,
+         (unsigned)rc,
          (unsigned long long)dm->cpuMemorySize,
          (unsigned long long)dm->gpuMemorySize,
          (unsigned long long)dm->cpuGpuMemorySize,
@@ -530,6 +524,7 @@ static int dr_setup(int videoFormat, int width, int height, int redrawRate,
         return -1;
     }
     s_video_format = videoFormat;
+    int is_hevc = (videoFormat & VIDEO_FORMAT_MASK_H265) ? 1 : 0;
 
     s_width = width;
     s_height = height;
@@ -542,11 +537,9 @@ static int dr_setup(int videoFormat, int width, int height, int redrawRate,
     s_have_pts_base = 0;
     video_reset_stats();
 
-    uint32_t codec_type, profile;
-    orbis_codec_from_format((uint32_t)videoFormat, &codec_type, &profile);
     LOGI("orbis: %s stream (fmt 0x%x) profile=%u dpb=%d",
-         orbis_codec_name(codec_type), videoFormat, profile,
-         (codec_type == ORBIS_VIDEODEC2_CODEC_HEVC && width >= 3840)
+         orbis_codec_name(is_hevc), videoFormat, ORBIS_VIDEODEC2_PROFILE_HIGH,
+         (is_hevc && width >= 3840)
              ? ORBIS_VIDEODEC2_DPB_HEVC_4K : ORBIS_VIDEODEC2_DPB_DEFAULT);
     /* The num_ref_frames=1 SPS rewrite is H.264-only; HEVC VPS/SPS/PPS pass
      * through untouched (see dr_submit). */
@@ -571,7 +564,7 @@ static int dr_setup(int videoFormat, int width, int height, int redrawRate,
     }
 
     OrbisVideodec2DecoderMemoryInfo dm;
-    if (query_decoder_mem(width, height, codec_type, profile, &dm) != 0) {
+    if (query_decoder_mem(width, height, is_hevc, &dm) != 0) {
         LOGE("orbis: QueryDecoderMemoryInfo failed");
         video_present_shutdown();
         videodec2_unload(&s_api);
@@ -588,11 +581,20 @@ static int dr_setup(int videoFormat, int width, int height, int redrawRate,
     OrbisVideodec2DecoderConfigInfo dc;
     videodec2_fill_decoder_config_ex(&dc, s_api.queue, width, height,
                                      s_tune_depth, s_tune_prio,
-                                     codec_type, profile);
+                                     ORBIS_VIDEODEC2_CODEC_AVC,
+                                     ORBIS_VIDEODEC2_PROFILE_HIGH, is_hevc);
 
-    int rc = s_api.CreateDecoder(&dc, &dm, &s_dec);
+    int rc;
+    if (is_hevc && s_api.CreateHevcDecoder) {
+        rc = s_api.CreateHevcDecoder(&dc, &dm, &s_dec);
+        if (rc < 0)
+            LOGE("orbis: CreateHevcDecoder 0x%08x", (unsigned)rc);
+    } else {
+        rc = s_api.CreateDecoder(&dc, &dm, &s_dec);
+        if (rc < 0)
+            LOGE("orbis: CreateDecoder 0x%08x", (unsigned)rc);
+    }
     if (rc < 0) {
-        LOGE("orbis: CreateDecoder 0x%08x", (unsigned)rc);
         free_all_dmem();
         video_present_shutdown();
         videodec2_unload(&s_api);
@@ -601,7 +603,7 @@ static int dr_setup(int videoFormat, int width, int height, int redrawRate,
 
     LOGI("orbis: Videodec2 %s listo %dx%d dpb=%d hmax=%d depth=%d prio=%d "
          "fb_n=%d au=%s blit=%s",
-         orbis_codec_name(codec_type), width, height, dc.maxDpbFrameCount,
+         orbis_codec_name(is_hevc), width, height, dc.maxDpbFrameCount,
          (height + 15) & ~15, s_tune_depth, s_tune_prio, s_fb_n,
          s_tune_au_onion ? "ONION" : "Garlic", nv12_blit_mode_name());
     return DR_OK;
