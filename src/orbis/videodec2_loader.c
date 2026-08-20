@@ -550,6 +550,30 @@ static const uint8_t spike_nal_pps[6] = {
     0x44, 0x01, 0xc1, 0x73, 0xc1, 0x89
 };
 
+/* Round 15: replicate the REAL path's fb mapping — AllocateDirectMemory +
+ * sceKernelMapDirectMemory2 (explicit ONION type). The plain-MapDirectMemory
+ * fb used by earlier probes may be why EVERY spike decode failed, including
+ * the AVC control. */
+static void *spike_alloc_fb2(size_t need, off_t *off_out, size_t *sz_out) {
+    size_t need2 = (need + DMEM_ALIGN - 1) & ~(size_t)(DMEM_ALIGN - 1);
+    if (need2 < DMEM_ALIGN)
+        need2 = DMEM_ALIGN;
+    off_t off = 0;
+    if (sceKernelAllocateDirectMemory(0, sceKernelGetDirectMemorySize(),
+                                      need2, DMEM_ALIGN,
+                                      ML_DMEM_TYPE_ONION, &off) < 0)
+        return NULL;
+    void *va = NULL;
+    if (sceKernelMapDirectMemory2(&va, need2, ML_DMEM_TYPE_ONION,
+                                  ML_DMEM_PROT_RW, 0, off, DMEM_ALIGN) < 0) {
+        sceKernelReleaseDirectMemory(off, need2);
+        return NULL;
+    }
+    *off_out = off;
+    *sz_out = need2;
+    return va;
+}
+
 static void spike_hevc_feed_probe(const videodec2_api_t *api, const char *label,
                                   uint32_t createCodecType, uint32_t createProfile,
                                   uint32_t createLevel, int createDpb,
@@ -608,8 +632,8 @@ static void spike_hevc_feed_probe(const videodec2_api_t *api, const char *label,
     off_t fb_o = 0;
     size_t fb_s = 0;
     if (dm.maxFrameBufferSize &&
-        alloc_dmem((size_t)dm.maxFrameBufferSize, ML_DMEM_TYPE_ONION,
-                   &fb_m, &fb_o, &fb_s) < 0) {
+        (fb_m = spike_alloc_fb2((size_t)dm.maxFrameBufferSize,
+                                &fb_o, &fb_s)) == NULL) {
         LOGE("spike[%s]: fb alloc FAILED", label);
         goto out;
     }
@@ -731,8 +755,8 @@ static void spike_dec2_probe(const videodec2_api_t *api, const char *label,
     off_t fb_o = 0;
     size_t fb_s = 0;
     if (dm.maxFrameBufferSize &&
-        alloc_dmem((size_t)dm.maxFrameBufferSize, ML_DMEM_TYPE_ONION,
-                   &fb_m, &fb_o, &fb_s) < 0) {
+        (fb_m = spike_alloc_fb2((size_t)dm.maxFrameBufferSize,
+                                &fb_o, &fb_s)) == NULL) {
         LOGE("spike[%s]: fb alloc FAILED", label);
         goto out;
     }
