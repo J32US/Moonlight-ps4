@@ -55,13 +55,38 @@ Final validated matrix:
 | lvl=153 @ 4K | | |
 | dpb=6 @ 4K | | |
 
-## Decode timing (1080p60 HEVC SDR)
+## ✅ FINAL RESULT — HEVC DECODES ON FW 12.00 (2026-08-20)
 
-- decode ms: __ (target ≤ AVC baseline +10%)
-- convert ms: __ (YCbCr path ≈ 0)
-- present ms: __
+**The wall is broken.** Rounds 1-22 (universal 0x811d0303 → 0x811d0200) ended
+by RE of retail apps. The create config that works (Apple TV CUSA24386's
+combo, verified live):
+
+| field | value |
+|---|---|
+| resourceType | **1 (EMBEDDED)** — NOT 0xb6c8 (Netflix's; gate rejects type 4) |
+| codecType | **0xee049** (packed 0xee04900000001 at config+0x08) |
+| profile | 1 (Main) / 2 (Main10) — both decode |
+| maxLevel | 120 (1080p) / 153 (4K); 123 OK; 0 REJECTED (0205) |
+| maxDpbFrameCount | 4 (1080p) / 6 (4K) — must match query |
+| decodePipelineDepth | 1 (0 worked too) |
+| cpuThreadPriority | -1 |
+| cpuAffinityMask | 0 |
+| checkMemoryType | 0 |
+| entry point | generic QueryDecoderMemoryInfo + CreateDecoder |
+| computeQueue | required (0x811d0110 without); pipe 0/0 fine |
+
+Full history of the 22 rounds, the type-2-vs-type-4 gate discovery, and the
+Netflix/Apple TV RE recipes: `references/videodec2-hevc-spike.md` in the
+ps4-homebrew skill (kept in sync).
+
+## Decode timing (1080p60 HEVC SDR) — LIVE VERIFIED
+
+- decode: **5.4 ms** (H.264 baseline 6.3 ms — HEVC is FASTER)
+- convert: **1.7 ms** (BGRA bounce 0.5 + bgra 1.2)
+- present: **0.0 ms**
+- drops: **0 sustained** @ 1080p60, 50 Mbps, Sunshine 7.1 / vibepollo
 
 ## Baseline reference (AVC, stock)
 
-From Task 0.3 console baseline (fill in):
-- decode: __ ms, convert: __ ms, present: __ ms @ 1080p60 H.264
+From Task 0.3 console baseline:
+- decode: **6.3 ms**, convert: **1.6 ms**, present: **0.1 ms** @ 1080p60 H.264
