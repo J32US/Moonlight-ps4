@@ -401,15 +401,23 @@ static int query_decoder_mem(int w, int h, int is_hevc,
                                      s_tune_depth, s_tune_prio,
                                      ORBIS_VIDEODEC2_CODEC_AVC,
                                      ORBIS_VIDEODEC2_PROFILE_HIGH, is_hevc);
+    /* Round 17 (2026-08-20): HEVC routing ground truth from the Netflix
+     * CUSA00127 eboot RE. The wrapper validates codecType in {1=AVC,
+     * 0xee049=HEVC} and resourceType in {0x12384=AVC, 0xb6c8=HEVC}; the
+     * old codecType=1/resType=1 routed HEVC data to the AVC codec ->
+     * universal 0x811d0303. Profile 1 (Main), maxLevel 120 (L4.0) /
+     * 153 (L5.1) per Netflix's SonyHevcVideoDecoder::create. */
+    if (is_hevc) {
+        dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_HEVC;
+        dc.codecType = ORBIS_VIDEODEC2_CODEC_HEVC;
+        dc.profile = 1;
+        dc.maxLevel = (h >= 1089) ? 153 : 120;
+        dc.maxDpbFrameCount = -1;
+    }
 
     memset(dm, 0, sizeof(*dm));
     dm->thisSize = sizeof(*dm);
-    /* HEVC has its own query export (validated on console). */
-    int rc;
-    if (is_hevc && s_api.QueryHevcDecoderMemoryInfo)
-        rc = s_api.QueryHevcDecoderMemoryInfo(&dc, dm);
-    else
-        rc = s_api.QueryDecoderMemoryInfo(&dc, dm);
+    int rc = s_api.QueryDecoderMemoryInfo(&dc, dm);
     LOGI("orbis: %sQueryDecoderMemoryInfo %dx%d resType=%u prof=%u lvl=%u => 0x%08x "
          "cpu=%llu gpu=%llu cpuGpu=%llu fb=%llu",
          is_hevc ? "Hevc" : "", w, h, dc.resourceType, dc.profile, dc.maxLevel,
@@ -593,17 +601,19 @@ static int dr_setup(int videoFormat, int width, int height, int redrawRate,
                                      s_tune_depth, s_tune_prio,
                                      ORBIS_VIDEODEC2_CODEC_AVC,
                                      ORBIS_VIDEODEC2_PROFILE_HIGH, is_hevc);
-
-    int rc;
-    if (is_hevc && s_api.CreateHevcDecoder) {
-        rc = s_api.CreateHevcDecoder(&dc, &dm, &s_dec);
-        if (rc < 0)
-            LOGE("orbis: CreateHevcDecoder 0x%08x", (unsigned)rc);
-    } else {
-        rc = s_api.CreateDecoder(&dc, &dm, &s_dec);
-        if (rc < 0)
-            LOGE("orbis: CreateDecoder 0x%08x", (unsigned)rc);
+    /* Round 17: Netflix routing values (see query_decoder_mem) — MUST match
+     * the query config exactly (memory sizes depend on it). */
+    if (is_hevc) {
+        dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_HEVC;
+        dc.codecType = ORBIS_VIDEODEC2_CODEC_HEVC;
+        dc.profile = 1;
+        dc.maxLevel = (height >= 1089) ? 153 : 120;
+        dc.maxDpbFrameCount = -1;
     }
+
+    int rc = s_api.CreateDecoder(&dc, &dm, &s_dec);
+    if (rc < 0)
+        LOGE("orbis: CreateDecoder 0x%08x", (unsigned)rc);
     if (rc < 0) {
         free_all_dmem();
         video_present_shutdown();

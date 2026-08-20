@@ -7,22 +7,29 @@
 #include <string.h>
 
 #define ORBIS_VIDEODEC2_CODEC_AVC 1
-#define ORBIS_VIDEODEC2_CODEC_HEVC 2 /* logical id; struct field stays 1 (validated) */
+/* FW 12.00 ground truth (RE of Netflix CUSA00127 eboot, 2026-08-20):
+ * wrapper validates codecType in {1=AVC, 0xee049=HEVC}, resourceType in
+ * {0x12384=AVC, 0xb6c8=HEVC}; HEVC profile 1/2, maxLevel 120/123/150/153/156.
+ * Rounds 1-16 used AVC routing (ct=1/resType=1) for HEVC -> universal 0303. */
+#define ORBIS_VIDEODEC2_CODEC_HEVC 0xEE049u
+#define ORBIS_VIDEODEC2_RESOURCE_TYPE_AVC 0x12384u
+#define ORBIS_VIDEODEC2_RESOURCE_TYPE_HEVC 0xB6C8u
 
 // Validated on console: resourceType=0 → 0x811D0203; without profile/level → 0x811D0205;
 // cpuThreadPriority=16 → 0x811D0208.
-#define ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED 1u
-#define ORBIS_VIDEODEC2_PROFILE_HIGH           100u
-#define ORBIS_VIDEODEC2_LEVEL_51               51u
-/* FW 12.00 console-validated (2026-08-20): HEVC uses the SAME struct values
- * as AVC — codecType=1, profile=100, level=51. The decoder type is selected
- * by the entry point (sceVideodec2CreateHevcDecoder), NOT the fields.
- * Main10 value still unverified (Phase 3 spike: try 102/202). */
-#define ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN      100u /* == PROFILE_HIGH */
-#define ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN10    202u /* UNVERIFIED — Phase 3 */
-#define ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51      51u  /* == LEVEL_51 (AVC-style) */
-#define ORBIS_VIDEODEC2_DPB_DEFAULT            4    /* AVC + 1080p HEVC */
-#define ORBIS_VIDEODEC2_DPB_HEVC_4K            6    /* HEVC L5.1 4K min DPB */
+#define ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED 1u     /* legacy AVC alias */
+#define ORBIS_VIDEODEC2_PROFILE_HIGH           100u   /* AVC High */
+#define ORBIS_VIDEODEC2_LEVEL_51               51u    /* AVC L5.1 */
+/* FW 12.00 HEVC space (RE of Netflix CUSA00127 eboot, 2026-08-20): HEVC
+ * profile is 1 (Main) / 2 (Main10), maxLevel 120 (L4.0) / 123 / 150 / 153
+ * (L5.1) / 156; routing via resourceType=0xb6c8 + codecType=0xee049 on the
+ * GENERIC CreateDecoder/QueryDecoderMemoryInfo entry points. */
+#define ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN      1u
+#define ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN10    2u     /* Phase 3 (HDR) */
+#define ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_40      120u
+#define ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51      153u
+#define ORBIS_VIDEODEC2_DPB_DEFAULT            4      /* AVC + 1080p HEVC */
+#define ORBIS_VIDEODEC2_DPB_HEVC_4K            6      /* HEVC L5.1 4K min DPB */
 #define ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT    700
 #define ORBIS_VIDEODEC2_AFFINITY_ALL           0x3Full
 
