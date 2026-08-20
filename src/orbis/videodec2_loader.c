@@ -703,58 +703,33 @@ static void spike_hevc_au_probe(const videodec2_api_t *api, const char *label,
  * GENERIC entry points: resourceType=0xb6c8, codecType=0xee049, profile=1,
  * maxLevel=120, maxDpbFrameCount=-1, decodePipelineDepth=2,
  * cpuThreadPriority=-1, optimizeProgressiveVideo=1, checkMemoryType=1. */
-static void spike_netflix_probe(const videodec2_api_t *api, const char *label,
-                                const uint8_t *au, size_t au_len) {
-    OrbisVideodec2DecoderConfigInfo dc;
-    videodec2_fill_decoder_config(&dc, api->queue, 1920, 1080);
-    dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_HEVC; /* 0xb6c8 */
-    dc.codecType = ORBIS_VIDEODEC2_CODEC_HEVC;            /* 0xee049 */
-    dc.profile = 1;                                       /* HEVC Main */
-    dc.maxLevel = 120;                                    /* HEVC L4.0 */
-    dc.maxDpbFrameCount = -1;                             /* unlimited (Netflix) */
-    dc.decodePipelineDepth = 2;                           /* Netflix */
-    dc.cpuAffinityMask = 0;                               /* Netflix */
-    dc.cpuThreadPriority = -1;                            /* Netflix */
-    dc.optimizeProgressiveVideo = true;                   /* Netflix */
-    dc.checkMemoryType = true;                            /* Netflix */
-
-    OrbisVideodec2DecoderMemoryInfo dm;
-    memset(&dm, 0, sizeof(dm));
-    dm.thisSize = sizeof(dm);
-    int rc = api->QueryDecoderMemoryInfo(&dc, &dm);
-    if (rc != 0) {
-        LOGI("spike[%s]: QueryDecoderMemoryInfo(res=0xb6c8 codec=0xee049 "
-             "prof=1 lvl=120 dpb=-1) => 0x%08x (skip)", label, (unsigned)rc);
-        return;
-    }
-    LOGI("spike[%s]: query OK cpu=%llu gpu=%llu cpuGpu=%llu fb=%llu", label,
-         (unsigned long long)dm.cpuMemorySize,
-         (unsigned long long)dm.gpuMemorySize,
-         (unsigned long long)dm.cpuGpuMemorySize,
-         (unsigned long long)dm.maxFrameBufferSize);
+static void spike_netflix_run_variant(const videodec2_api_t *api, const char *label,
+                                         OrbisVideodec2DecoderConfigInfo *dc,
+                                         OrbisVideodec2DecoderMemoryInfo *dm,
+                                         const uint8_t *au, size_t au_len) {
     void *cpu_m = NULL, *gpu_m = NULL, *cg_m = NULL;
     off_t cpu_o = 0, gpu_o = 0, cg_o = 0;
     size_t cpu_s = 0, gpu_s = 0, cg_s = 0;
-    if ((dm.cpuMemorySize &&
-         alloc_dmem((size_t)dm.cpuMemorySize, ML_DMEM_TYPE_ONION,
+    if ((dm->cpuMemorySize &&
+         alloc_dmem((size_t)dm->cpuMemorySize, ML_DMEM_TYPE_ONION,
                     &cpu_m, &cpu_o, &cpu_s) < 0) ||
-        (dm.gpuMemorySize &&
-         alloc_dmem((size_t)dm.gpuMemorySize, ML_DMEM_TYPE_GARLIC,
+        (dm->gpuMemorySize &&
+         alloc_dmem((size_t)dm->gpuMemorySize, ML_DMEM_TYPE_GARLIC,
                     &gpu_m, &gpu_o, &gpu_s) < 0) ||
-        (dm.cpuGpuMemorySize &&
-         alloc_dmem((size_t)dm.cpuGpuMemorySize, ML_DMEM_TYPE_ONION,
+        (dm->cpuGpuMemorySize &&
+         alloc_dmem((size_t)dm->cpuGpuMemorySize, ML_DMEM_TYPE_ONION,
                     &cg_m, &cg_o, &cg_s) < 0)) {
         LOGE("spike[%s]: alloc FAILED", label);
         goto out;
     }
-    dm.cpuMemory = cpu_m;
-    dm.gpuMemory = gpu_m;
-    dm.cpuGpuMemory = cg_m;
+    dm->cpuMemory = cpu_m;
+    dm->gpuMemory = gpu_m;
+    dm->cpuGpuMemory = cg_m;
 
     OrbisVideodec2Decoder dec = NULL;
-    int rc2 = api->CreateDecoder(&dc, &dm, &dec);
+    int rc2 = api->CreateDecoder(dc, dm, &dec);
     if (!dec || rc2 != 0) {
-        LOGI("spike[%s]: CreateDecoder(netflix cfg) => 0x%08x", label, (unsigned)rc2);
+        LOGI("spike[%s]: CreateDecoder => 0x%08x", label, (unsigned)rc2);
         goto out;
     }
     LOGI("spike[%s]: CreateDecoder OK handle=%p — HEVC routing via generic entry",
@@ -763,8 +738,8 @@ static void spike_netflix_probe(const videodec2_api_t *api, const char *label,
     void *fb_m = NULL;
     off_t fb_o = 0;
     size_t fb_s = 0;
-    if (dm.maxFrameBufferSize &&
-        (fb_m = spike_alloc_fb2((size_t)dm.maxFrameBufferSize,
+    if (dm->maxFrameBufferSize &&
+        (fb_m = spike_alloc_fb2((size_t)dm->maxFrameBufferSize,
                                 &fb_o, &fb_s)) == NULL) {
         LOGE("spike[%s]: fb alloc FAILED", label);
         goto out;
@@ -807,6 +782,67 @@ out:
     if (cpu_m) sceKernelReleaseDirectMemory(cpu_o, cpu_s);
     if (gpu_m) sceKernelReleaseDirectMemory(gpu_o, gpu_s);
     if (cg_m) sceKernelReleaseDirectMemory(cg_o, cg_s);
+}
+
+/* Round 18 (2026-08-20): the codec-module query (core GOT [0xc61d8]) rejects
+ * the first Netflix-config attempt with CONFIG_INFO (0x811d0200) at the
+ * QUERY stage — the wrapper's own validation passed (no 0203/0204/0205).
+ * Sweep the fields that differ from Netflix's exact construction: raw vs
+ * aligned height (1080 vs 1088), dpb (-1 vs powers of 2), profile (1 vs 2).
+ * Each passing query runs the full create+decode against the file AU. */
+static void spike_netflix_probe(const videodec2_api_t *api, const char *label,
+                                const uint8_t *au, size_t au_len) {
+    static const struct {
+        const char *tag;
+        int height;   /* raw height sent */
+        int dpb;
+        int profile;
+    } variants[] = {
+        { "h1080-dpb-1-p1", 1080, -1, 1 },
+        { "h1088-dpb-1-p1", 1088, -1, 1 },
+        { "h1080-dpb4-p1",  1080, 4,  1 },
+        { "h1080-dpb8-p1",  1080, 8,  1 },
+        { "h1080-dpb16-p1", 1080, 16, 1 },
+        { "h1080-dpb-1-p2", 1080, -1, 2 },
+        { "h1080-dpb4-p2",  1080, 4,  2 },
+    };
+    char vlabel[64];
+    for (size_t v = 0; v < sizeof(variants) / sizeof(variants[0]); v++) {
+        snprintf(vlabel, sizeof(vlabel), "%s-%s", label, variants[v].tag);
+        OrbisVideodec2DecoderConfigInfo dc;
+        videodec2_fill_decoder_config(&dc, api->queue, 1920, variants[v].height);
+        dc.maxFrameHeight = variants[v].height; /* raw, no 16-align */
+        dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_HEVC; /* 0xb6c8 */
+        dc.codecType = ORBIS_VIDEODEC2_CODEC_HEVC;            /* 0xee049 */
+        dc.profile = variants[v].profile;                     /* HEVC Main */
+        dc.maxLevel = 120;                                    /* HEVC L4.0 */
+        dc.maxDpbFrameCount = variants[v].dpb;
+        dc.decodePipelineDepth = 2;                           /* Netflix */
+        dc.cpuAffinityMask = 0;                               /* Netflix */
+        dc.cpuThreadPriority = -1;                            /* Netflix */
+        dc.optimizeProgressiveVideo = true;                   /* Netflix */
+        dc.checkMemoryType = true;                            /* Netflix */
+
+        OrbisVideodec2DecoderMemoryInfo dm;
+        memset(&dm, 0, sizeof(dm));
+        dm.thisSize = sizeof(dm);
+        int rc = api->QueryDecoderMemoryInfo(&dc, &dm);
+        if (rc != 0) {
+            LOGI("spike[%s]: Query(res=0xb6c8 codec=0xee049 prof=%d lvl=120 "
+                 "h=%d dpb=%d) => 0x%08x (skip)",
+                 vlabel, variants[v].profile, variants[v].height,
+                 variants[v].dpb, (unsigned)rc);
+            continue;
+        }
+        LOGI("spike[%s]: QUERY OK h=%d dpb=%d prof=%d cpu=%llu gpu=%llu "
+             "cpuGpu=%llu fb=%llu",
+             vlabel, variants[v].height, variants[v].dpb, variants[v].profile,
+             (unsigned long long)dm.cpuMemorySize,
+             (unsigned long long)dm.gpuMemorySize,
+             (unsigned long long)dm.cpuGpuMemorySize,
+             (unsigned long long)dm.maxFrameBufferSize);
+        spike_netflix_run_variant(api, vlabel, &dc, &dm, au, au_len);
+    }
 }
 
 /* Round 12: structural variants + the AVC control. flags:
