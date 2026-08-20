@@ -794,18 +794,31 @@ static void spike_netflix_probe(const videodec2_api_t *api, const char *label,
                                 const uint8_t *au, size_t au_len) {
     static const struct {
         const char *tag;
-        int height;   /* raw height sent */
+        int height;
         int dpb;
         int profile;
+        int depth;      /* decodePipelineDepth */
+        int prio;       /* cpuThreadPriority */
+        int affinity;   /* cpuAffinityMask */
+        int checkmem;   /* checkMemoryType */
+        int maxlevel;   /* maxLevel */
     } variants[] = {
-        { "h1080-dpb-1-p1", 1080, -1, 1 },
-        { "h1088-dpb-1-p1", 1088, -1, 1 },
-        { "h1080-dpb4-p1",  1080, 4,  1 },
-        { "h1080-dpb8-p1",  1080, 8,  1 },
-        { "h1080-dpb16-p1", 1080, 16, 1 },
-        { "h1080-dpb-1-p2", 1080, -1, 2 },
-        { "h1080-dpb4-p2",  1080, 4,  2 },
+        /* r19: keep HEVC routing (0xb6c8/0xee049) but fill everything else
+         * like the WORKING AVC query row (C-100/51: depth=1 prio=700
+         * aff=0x3F checkmem=0 h=1088), then flip one field per row to find
+         * which one the codec-module query rejects. */
+        { "avcstyle",        1088, 4,  1, 1, 700, 0x3F, 0, 120 },
+        { "avcstyle-h1080",  1080, 4,  1, 1, 700, 0x3F, 0, 120 },
+        { "avcstyle-dpb-1",  1088, -1, 1, 1, 700, 0x3F, 0, 120 },
+        { "avcstyle-dpb8",   1088, 8,  1, 1, 700, 0x3F, 0, 120 },
+        { "avcstyle-depth2", 1088, 4,  1, 2, 700, 0x3F, 0, 120 },
+        { "avcstyle-prio-1", 1088, 4,  1, 1, -1,  0x3F, 0, 120 },
+        { "avcstyle-aff0",   1088, 4,  1, 1, 700, 0,    0, 120 },
+        { "avcstyle-check1", 1088, 4,  1, 1, 700, 0x3F, 1, 120 },
+        { "avcstyle-lvl123", 1088, 4,  1, 1, 700, 0x3F, 0, 123 },
+        { "avcstyle-lvl153", 1088, 4,  1, 1, 700, 0x3F, 0, 153 },
     };
+
     char vlabel[64];
     for (size_t v = 0; v < sizeof(variants) / sizeof(variants[0]); v++) {
         snprintf(vlabel, sizeof(vlabel), "%s-%s", label, variants[v].tag);
@@ -815,28 +828,32 @@ static void spike_netflix_probe(const videodec2_api_t *api, const char *label,
         dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_HEVC; /* 0xb6c8 */
         dc.codecType = ORBIS_VIDEODEC2_CODEC_HEVC;            /* 0xee049 */
         dc.profile = variants[v].profile;                     /* HEVC Main */
-        dc.maxLevel = 120;                                    /* HEVC L4.0 */
+        dc.maxLevel = variants[v].maxlevel;
         dc.maxDpbFrameCount = variants[v].dpb;
-        dc.decodePipelineDepth = 2;                           /* Netflix */
-        dc.cpuAffinityMask = 0;                               /* Netflix */
-        dc.cpuThreadPriority = -1;                            /* Netflix */
-        dc.optimizeProgressiveVideo = true;                   /* Netflix */
-        dc.checkMemoryType = true;                            /* Netflix */
+        dc.decodePipelineDepth = variants[v].depth;
+        dc.cpuAffinityMask = variants[v].affinity;
+        dc.cpuThreadPriority = variants[v].prio;
+        dc.optimizeProgressiveVideo = true;
+        dc.checkMemoryType = variants[v].checkmem ? true : false;
 
         OrbisVideodec2DecoderMemoryInfo dm;
         memset(&dm, 0, sizeof(dm));
         dm.thisSize = sizeof(dm);
         int rc = api->QueryDecoderMemoryInfo(&dc, &dm);
         if (rc != 0) {
-            LOGI("spike[%s]: Query(res=0xb6c8 codec=0xee049 prof=%d lvl=120 "
-                 "h=%d dpb=%d) => 0x%08x (skip)",
-                 vlabel, variants[v].profile, variants[v].height,
-                 variants[v].dpb, (unsigned)rc);
+            LOGI("spike[%s]: Query(res=0xb6c8 codec=0xee049 prof=%d lvl=%d "
+                 "h=%d dpb=%d depth=%d prio=%d aff=0x%x cm=%d) => 0x%08x (skip)",
+                 vlabel, variants[v].profile, variants[v].maxlevel,
+                 variants[v].height, variants[v].dpb, variants[v].depth,
+                 variants[v].prio, variants[v].affinity, variants[v].checkmem,
+                 (unsigned)rc);
             continue;
         }
-        LOGI("spike[%s]: QUERY OK h=%d dpb=%d prof=%d cpu=%llu gpu=%llu "
-             "cpuGpu=%llu fb=%llu",
+        LOGI("spike[%s]: QUERY OK h=%d dpb=%d prof=%d lvl=%d depth=%d "
+             "prio=%d aff=0x%x cm=%d cpu=%llu gpu=%llu cpuGpu=%llu fb=%llu",
              vlabel, variants[v].height, variants[v].dpb, variants[v].profile,
+             variants[v].maxlevel, variants[v].depth, variants[v].prio,
+             variants[v].affinity, variants[v].checkmem,
              (unsigned long long)dm.cpuMemorySize,
              (unsigned long long)dm.gpuMemorySize,
              (unsigned long long)dm.cpuGpuMemorySize,
