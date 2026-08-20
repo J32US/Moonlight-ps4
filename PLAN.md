@@ -1,11 +1,13 @@
-# Moonlight PS4 Port (OpenOrbis, FW 9.00)
+# Moonlight PS4 Port (OpenOrbis, FW 12.00)
 
-Native Moonlight client for jailbroken PS4 (firmware 9.00, GoldHEN), written in C on top of
+Native Moonlight client for jailbroken PS4 (firmware 12.00, GoldHEN), written in C on top of
 upstream `moonlight-common-c` and the OpenOrbis toolchain, with the video decoder behind an
 abstract interface: FFmpeg software decode to validate the full stack, and `libSceVideodec2`
-hardware decode as the stretch goal.
+hardware decode (H.264 **and HEVC**) as the primary path.
 
-**Current version: 1.1.0** (as of 2026-08-11).
+**Current version: 1.1.0** (2026-08-20). HEVC hardware decode: **WORKING on FW 12.00** —
+5.4 ms/frame @1080p60 (faster than the H.264 baseline), Phase 1 of the HEVC/HDR/4K mod plan
+complete. See `docs/SPIKE_HEVC.md` for the verified create config.
 
 ## Realistic goal
 
@@ -257,6 +259,22 @@ makes it a poor latency choice). A working 720p60 client is a better product tha
 With hardware working: real frame pacing using `presentationTimeUs` and `rtpTimestamp` from the
 `DECODE_UNIT`, synced to flip, dropping late frames instead of decoding them late.
 
+**HEVC hardware decode — DONE (2026-08-20).** The videodec2 HEVC wall (universal
+`0x811d0303`/`0x811d0200`, rounds 1-22) was broken by RE of retail apps: Netflix
+(CUSA00127) uses `resourceType=0xb6c8 + codecType=0xee049` (internal type 4 — REJECTED by
+the codec-module gate); Apple TV (CUSA24386) uses **`resourceType=1 (EMBEDDED) +
+codecType=0xee049`** (internal type 2 — ACCEPTED). Verified live: `Decode 0x00000000`
+sustained, decode 5.4 ms, convert 1.7 ms, present 0.0 ms @1080p60, drop=0. Config:
+profile=1 (Main), maxLevel=120 (<1089px) / 153 (4K), dpb=4 (1080p) / 6 (4K), prio=-1,
+aff=0, via generic `QueryDecoderMemoryInfo` + `CreateDecoder`. Main10 (profile=2) also
+console-validated — the Phase 3 HDR lever.
+
+**4K (Pro) — prepared, pending present path.** 4K HEVC query/create validated in the
+spike matrix (lvl=153, dpb=6, cpu=67520256 gpu=136861184 cpuGpu=50800384 fb=12445696).
+Blocker for 4K60: the CPU BGRA convert path dies at 4K on Jaguar (8.3M px vs 2M) — 4K
+needs the native YCbCr present path (kernel-gated: `0x80290001` on ioctl `0xc0308206`;
+GoldHEN PRX + FW kpayload per `docs/KERNEL_YCBCR_RE.md`).
+
 ### Phase 7 — UI, configuration, and packaging
 
 Host discovery (mDNS), app list, pairing and settings menus. INI config via inih, storing only
@@ -309,10 +327,13 @@ real loss.
 
 - [x] `CAPABILITY_SLICES_PER_FRAME(4)` declared on the software decoder
 - [x] Isolated `libSceVideodec2` spike (`videodec2_spike` / `-DMOONLIGHT_VIDEODEC2` era; now always compiled with `ML_ENABLE_VIDEODEC2`)
-- [x] Phase 6 (code): `decoder_orbis.c` + runtime HW/SW selection via `prefer_hw` (default true); **broader console validation still open**
+- [x] Phase 6 (code): `decoder_orbis.c` + runtime HW/SW selection via `prefer_hw` (default true)
+- [x] **HEVC hardware decode: WORKING** (2026-08-20, commit 4364d64) — live stream verified @1080p60, decode 5.4 ms, drop=0. Working cell: `resourceType=1 + codecType=0xee049` (Apple TV's combo; Netflix's 0xb6c8 is gate-rejected)
 - [x] YCbCr/NV12 presentation in `sceVideoOut` (`YCBCR420_BT709`) — **experimental**; requires GoldHEN plugin + kpayload; **BGRA fallback is the reliable path**
+- [ ] **4K60** — decode path validated (lvl=153/dpb=6); blocked on native YCbCr present (kernel gate) — CPU BGRA convert dies at 4K
+- [ ] **Phase 3: HDR (Main10)** — profile=2 already console-validated; needs 10-bit present + SMPTE 2086 metadata RE
 - [ ] Advanced frame pacing with `presentationTimeUs` / `rtpTimestamp`
-- [ ] Broader on-console validation (HW path, YCbCr path, sustained sessions)
+- [ ] Broader on-console validation (sustained sessions, 4K stream)
 
 
 

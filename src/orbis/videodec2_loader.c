@@ -794,24 +794,30 @@ static void spike_netflix_probe(const videodec2_api_t *api, const char *label,
                                 const uint8_t *au, size_t au_len) {
     static const struct {
         const char *tag;
-        int profile;   /* 1 Main / 2 Main10 */
-        int maxlevel;  /* 0 (Apple leaves 0), 120, 153 */
+        int w, h;        /* frame dims */
+        int profile;     /* 1 Main / 2 Main10 */
+        int maxlevel;    /* 0 (Apple leaves 0), 120, 123, 153 */
         int dpb;
         int depth;
     } variants[] = {
-        { "atv-exact",    2, 0,   6, 0 },
-        { "atv-p1-lvl0",  1, 0,   4, 0 },
-        { "atv-p1-lvl120",1, 120, 4, 1 },
-        { "atv-p1-lvl153",1, 153, 4, 1 },
-        { "atv-p2-lvl120",2, 120, 6, 1 },
-        { "atv-p1-lvl123",1, 123, 4, 1 },
+        /* 1080p rows (r22 verified cell) */
+        { "atv-exact",    1920, 1080, 2, 0,   6, 0 },
+        { "atv-p1-lvl0",  1920, 1080, 1, 0,   4, 0 },
+        { "atv-p1-lvl120",1920, 1080, 1, 120, 4, 1 },
+        { "atv-p1-lvl153",1920, 1080, 1, 153, 4, 1 },
+        { "atv-p2-lvl120",1920, 1080, 2, 120, 6, 1 },
+        { "atv-p1-lvl123",1920, 1080, 1, 123, 4, 1 },
+        /* 4K rows (r24): same cell, L5.1, dpb 6 — FTP a 4K AU first! */
+        { "4k-p1-lvl153", 3840, 2160, 1, 153, 6, 1 },
+        { "4k-p2-lvl153", 3840, 2160, 2, 153, 6, 1 },
     };
     char vlabel[64];
     for (size_t v = 0; v < sizeof(variants) / sizeof(variants[0]); v++) {
         snprintf(vlabel, sizeof(vlabel), "%s-%s", label, variants[v].tag);
         OrbisVideodec2DecoderConfigInfo dc;
-        videodec2_fill_decoder_config(&dc, api->queue, 1920, 1080);
-        dc.maxFrameHeight = 1080; /* raw */
+        videodec2_fill_decoder_config(&dc, api->queue, variants[v].w,
+                                      variants[v].h);
+        dc.maxFrameHeight = variants[v].h; /* raw */
         dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED; /* 1, Apple! */
         dc.codecType = ORBIS_VIDEODEC2_CODEC_HEVC;                /* 0xee049 */
         dc.profile = variants[v].profile;
@@ -829,15 +835,16 @@ static void spike_netflix_probe(const videodec2_api_t *api, const char *label,
         int rc = api->QueryDecoderMemoryInfo(&dc, &dm);
         if (rc != 0) {
             LOGI("spike[%s]: Query(res=1 codec=0xee049 prof=%d lvl=%d dpb=%d "
-                 "depth=%d) => 0x%08x (skip)",
+                 "depth=%d %dx%d) => 0x%08x (skip)",
                  vlabel, variants[v].profile, variants[v].maxlevel,
-                 variants[v].dpb, variants[v].depth, (unsigned)rc);
+                 variants[v].dpb, variants[v].depth, variants[v].w,
+                 variants[v].h, (unsigned)rc);
             continue;
         }
-        LOGI("spike[%s]: QUERY OK prof=%d lvl=%d dpb=%d cpu=%llu gpu=%llu "
+        LOGI("spike[%s]: QUERY OK %dx%d prof=%d lvl=%d dpb=%d cpu=%llu gpu=%llu "
              "cpuGpu=%llu fb=%llu",
-             vlabel, variants[v].profile, variants[v].maxlevel,
-             variants[v].dpb,
+             vlabel, variants[v].w, variants[v].h, variants[v].profile,
+             variants[v].maxlevel, variants[v].dpb,
              (unsigned long long)dm.cpuMemorySize,
              (unsigned long long)dm.gpuMemorySize,
              (unsigned long long)dm.cpuGpuMemorySize,
