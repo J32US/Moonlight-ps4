@@ -1005,6 +1005,34 @@ int videodec2_spike_run(void) {
                             spike_au_dpb1, sizeof(spike_au_dpb1));
         spike_hevc_au_probe(&api, "hevc-min2", 1, 100, 51, 4,
                             spike_au_min2, sizeof(spike_au_min2));
+        /* Round 14: file-based full-AU test. FTP a complete AU (config +
+         * IDR, e.g. x265_full_au.bin or the captured primer_au.bin) to
+         * /data/moonlight/spike_au.bin; it is fed to both decoders from
+         * ONION DirectMemory. This distinguishes "codec rejects the AMF
+         * stream" from "HEVC path broken". */
+        {
+            FILE *f = fopen("/data/moonlight/spike_au.bin", "rb");
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                long flen = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                if (flen > 0 && flen < (1 << 20)) {
+                    uint8_t *buf = malloc((size_t)flen);
+                    if (buf) {
+                        size_t rd = fread(buf, 1, (size_t)flen, f);
+                        LOGI("=== videodec2 spike: file AU (%zu bytes) ===", rd);
+                        spike_dec2_probe(&api, "file-au-hevc", 0, NULL,
+                                         buf, rd);
+                        spike_dec2_probe(&api, "file-au-avc", 1, NULL,
+                                         buf, rd);
+                        free(buf);
+                    }
+                } else {
+                    LOGE("videodec2: spike_au.bin bad size %ld", flen);
+                }
+                fclose(f);
+            }
+        }
         LOGI("=== videodec2 spike: decode acceptance DONE ===");
     }
 

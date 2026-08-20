@@ -697,8 +697,18 @@ static int dr_submit(PDECODE_UNIT du) {
     total = off;
     video_stats_add_au(now_us() - tau0, (unsigned long long)total);
 
-    if (!s_logged_au)
+    if (!s_logged_au) {
         log_nal_types(au, total);
+        /* Save the full first AU for offline analysis (FTP it back). */
+        FILE *pf = fopen("/data/moonlight/primer_au.bin", "wb");
+        if (pf) {
+            size_t wr = fwrite(au, 1, (size_t)total, pf);
+            fclose(pf);
+            LOGI("orbis: primer AU saved (%zu bytes)", wr);
+        } else {
+            LOGE("orbis: primer AU fopen FAILED");
+        }
+    }
 
     uint64_t t0 = now_us();
 
