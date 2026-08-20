@@ -746,17 +746,16 @@ static void nv12_to_bgra_rows(uint8_t *dst, int dst_pitch, int w,
     const uint8_t *yp = y + (size_t)row0 * (size_t)pitch_y;
     const uint8_t *uvp = uv + (size_t)(row0 / 2) * (size_t)pitch_uv;
     int h = row1 - row0;
-    /* TILED present: write GCN microtile order (not linear). */
+    /* TILED present: write GCN microtile order (not linear). 4K-only;
+     * inert at 1080p (s_tiled=0). */
     if (s_tiled) {
         (void)nv12_to_bgra_tiled(d, w, yp, uvp, pitch_y, pitch_uv, w, h);
         return;
     }
-    /* AVX1 (8 px float) — fast path for the common 1:1 case; the band
-     * workers call this with row-aligned dst (pitch is 16B-multiple for
-     * the registered buffers), so the AVX store is safe. Fall back to the
-     * proven SSE2 kernel if AVX is unavailable (returns 0). */
-    if (nv12_to_bgra_avx(d, dst_pitch, yp, uvp, pitch_y, pitch_uv, w, h, 0) == 1)
-        return;
+    /* NOTE (2026-08-20): AVX1 float kernel measured 3.75x SLOWER than the
+     * SSE2 integer kernel on Jaguar at 1080p (bgra 4.5ms vs 1.2ms — the
+     * per-pixel float<->int conversions dominate). SSE2 stays the SDR
+     * convert; AVX1/HDR10 kernels remain for the tabled 4K work. */
     if ((((uintptr_t)d | (uintptr_t)(unsigned)dst_pitch) & 15u) != 0)
         nv12_to_bgra_impl(d, dst_pitch, w, h, yp, uvp, pitch_y, pitch_uv,
                           BGRA_ST_UNALIGNED);
