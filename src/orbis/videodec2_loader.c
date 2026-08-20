@@ -599,6 +599,49 @@ static void spike_hevc_au_probe(const videodec2_api_t *api, const char *label,
                           aus, lens, 1);
 }
 
+static void spike_dump_module(const char *label, OrbisKernelModule mod,
+                              const char *path) {
+    OrbisKernelModuleInfo mi;
+    memset(&mi, 0, sizeof(mi));
+    mi.size = sizeof(mi);
+    int mrc = sceKernelGetModuleInfo(mod, &mi);
+    LOGI("videodec2: %s GetModuleInfo => 0x%08x segs=%u name='%s'",
+         label, (unsigned)mrc, mi.segmentCount, mi.name);
+    if (mrc == 0 && mi.segmentCount > 0 && mi.segmentCount <= 4) {
+        uintptr_t lo = (uintptr_t)-1, hi = 0;
+        for (uint32_t i = 0; i < mi.segmentCount; i++) {
+            uintptr_t a = (uintptr_t)mi.segmentInfo[i].address;
+            uintptr_t b = a + mi.segmentInfo[i].size;
+            LOGI("videodec2: %s seg[%u] addr=0x%lx size=0x%x prot=%d", label, i,
+                 (unsigned long)a, mi.segmentInfo[i].size,
+                 mi.segmentInfo[i].prot);
+            if (a < lo) lo = a;
+            if (b > hi) hi = b;
+        }
+        if (hi > lo) {
+            size_t total = (size_t)(hi - lo);
+            uint8_t *blob = malloc(total);
+            if (blob) {
+                memset(blob, 0, total);
+                for (uint32_t i = 0; i < mi.segmentCount; i++) {
+                    uintptr_t a = (uintptr_t)mi.segmentInfo[i].address;
+                    memcpy(blob + (a - lo), (const void *)a,
+                           mi.segmentInfo[i].size);
+                }
+                FILE *f = fopen(path, "wb");
+                if (f) {
+                    size_t wr = fwrite(blob, 1, total, f);
+                    fclose(f);
+                    LOGI("videodec2: %s dumped %zu bytes -> %s", label, wr, path);
+                } else {
+                    LOGE("videodec2: %s fopen %s FAILED", label, path);
+                }
+                free(blob);
+            }
+        }
+    }
+}
+
 int videodec2_spike_run(void) {
     LOGI("=== videodec2 spike begin ===");
     videodec2_api_t api;
@@ -607,51 +650,25 @@ int videodec2_spike_run(void) {
         return -1;
     }
 
-    /* Dump the loaded module image so the HEVC Decode path can be RE'd
-     * offline (the universal 0x811d0303 needs ground truth, not guesses). */
+    /* Dump the loaded module images so the HEVC Decode path can be RE'd
+     * offline (the universal 0x811d0303 needs ground truth, not guesses).
+     * libSceVideodec2 is a thin wrapper; the real logic is in VDECCORE. */
     if (api.module >= 0) {
-        OrbisKernelModuleInfo mi;
-        memset(&mi, 0, sizeof(mi));
-        mi.size = sizeof(mi);
-        int mrc = sceKernelGetModuleInfo((OrbisKernelModule)api.module, &mi);
-        LOGI("videodec2: GetModuleInfo => 0x%08x segs=%u name='%s'",
-             (unsigned)mrc, mi.segmentCount, mi.name);
         LOGI("videodec2: CreateHevcDecoder=%p Decode=%p QueryHevc=%p",
              (void *)api.CreateHevcDecoder, (void *)api.Decode,
              (void *)api.QueryHevcDecoderMemoryInfo);
-        if (mrc == 0 && mi.segmentCount > 0 && mi.segmentCount <= 4) {
-            uintptr_t lo = (uintptr_t)-1, hi = 0;
-            for (uint32_t i = 0; i < mi.segmentCount; i++) {
-                uintptr_t a = (uintptr_t)mi.segmentInfo[i].address;
-                uintptr_t b = a + mi.segmentInfo[i].size;
-                LOGI("videodec2:   seg[%u] addr=0x%lx size=0x%x prot=%d", i,
-                     (unsigned long)a, mi.segmentInfo[i].size,
-                     mi.segmentInfo[i].prot);
-                if (a < lo) lo = a;
-                if (b > hi) hi = b;
-            }
-            if (hi > lo) {
-                size_t total = (size_t)(hi - lo);
-                uint8_t *blob = malloc(total);
-                if (blob) {
-                    memset(blob, 0, total);
-                    for (uint32_t i = 0; i < mi.segmentCount; i++) {
-                        uintptr_t a = (uintptr_t)mi.segmentInfo[i].address;
-                        memcpy(blob + (a - lo), (const void *)a,
-                               mi.segmentInfo[i].size);
-                    }
-                    FILE *f = fopen("/data/moonlight/vdec2_blob.bin", "wb");
-                    if (f) {
-                        size_t wr = fwrite(blob, 1, total, f);
-                        fclose(f);
-                        LOGI("videodec2: dumped %zu bytes -> /data/moonlight/vdec2_blob.bin", wr);
-                    } else {
-                        LOGE("videodec2: fopen dump FAILED");
-                    }
-                    free(blob);
-                }
-            }
-        }
+        spike_dump_module("wrapper", (OrbisKernelModule)api.module,
+                          "/data/moonlight/vdec2_blob.bin");
+    }
+    {
+        OrbisKernelModule core = -1;
+        int hrc = sceSysmoduleGetModuleHandleInternal(
+            ORBIS_SYSMODULE_INTERNAL_VDECCORE, &core);
+        LOGI("videodec2: VDECCORE handle => 0x%08x mod=%p", (unsigned)hrc,
+             (void *)core);
+        if (hrc == 0 && core >= 0)
+            spike_dump_module("vdeccore", core,
+                              "/data/moonlight/vdeccore_blob.bin");
     }
 
     int rc = alloc_compute_queue(&api);
