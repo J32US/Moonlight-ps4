@@ -1,6 +1,19 @@
 # SPIKE HEVC — videodec2 constants, error catalog, timing (Phase 1, Task 1.3)
 
-Status: **PENDING — run `videodec2_spike = true` + `codec = hevc` on console (FW 12.00)**
+Status: **ROUND 1 DONE (2026-08-19, FW 12.00) — ROUND 2 in flight**
+
+Round 1 findings (console):
+- Generic `sceVideodec2CreateDecoder` **rejects codecType=2** with
+  `0x811d0204` = `ORBIS_VIDEODEC2_ERROR_CODEC_TYPE` (shadPS4
+  `videodec_error.h`). resType 2/3 → `0x811d0203` RESOURCE_TYPE (resType=1
+  is correct).
+- **HEVC is a separate export: `sceVideodec2CreateHevcDecoder`** (OpenOrbis
+  SDK header — shadPS4 doesn't implement it, hence it was invisible in
+  emulator research). Round 2 routes HEVC through it; query keeps codec=1
+  (QueryDecoderMemoryInfo itself validates codecType).
+- Round-1 spike harness bug: decoder memories (cpu/gpu/cpuGpu) were never
+  allocated → AVC CreateDecoder `0x811d0105` MEMORY_POINTER. Fixed in r2
+  (alloc ONION/GARLIC/ONION like the real app).
 
 ## How to run
 
