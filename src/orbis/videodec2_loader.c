@@ -518,6 +518,24 @@ static const uint8_t spike_au_avc[23] = {
     0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x2a, 0xa6, 0x3b, 0x40, 0x3c,
     0x01, 0x13, 0x20, 0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x3c, 0x80
 };
+static const uint8_t spike_au_dpb1[85] = {
+    0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x21, 0x60,
+    0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
+    0x7b, 0xba, 0x02, 0x40, 0x00, 0x00, 0x00, 0x01, 0x42, 0x01, 0x01, 0x21,
+    0x60, 0x00, 0x00, 0x03, 0x00, 0xb0, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03,
+    0x00, 0x7b, 0xa0, 0x03, 0xc0, 0x80, 0x10, 0xe5, 0x95, 0xe4, 0x90, 0x84,
+    0x0b, 0x9a, 0x80, 0x80, 0x80, 0x82, 0x00, 0x00, 0x07, 0xd2, 0x00, 0x01,
+    0xd4, 0xc0, 0x10, 0x00, 0x00, 0x00, 0x01, 0x44, 0x01, 0xc1, 0x73, 0xc1,
+    0x89
+};
+static const uint8_t spike_au_min2[72] = {
+    0x00, 0x00, 0x00, 0x01, 0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x21, 0x60,
+    0x00, 0x00, 0x03, 0x00, 0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00,
+    0x7b, 0xba, 0x02, 0x40, 0x00, 0x00, 0x00, 0x01, 0x42, 0x01, 0x01, 0x01,
+    0x60, 0x00, 0x00, 0x03, 0x00, 0xb0, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03,
+    0x00, 0x7b, 0xa0, 0x03, 0xc0, 0x80, 0x10, 0xe5, 0x95, 0xe4, 0x90, 0x84,
+    0x09, 0x20, 0x00, 0x00, 0x00, 0x01, 0x44, 0x01, 0xc1, 0x73, 0xc1, 0x89
+};
 static const uint8_t spike_nal_vps[24] = {
     0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x21, 0x60, 0x00, 0x00, 0x03, 0x00,
     0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x7b, 0xba, 0x02, 0x40
@@ -607,16 +625,28 @@ static void spike_hevc_feed_probe(const videodec2_api_t *api, const char *label,
     out.thisSize = sizeof(out);
 
     for (int i = 0; i < n; i++) {
+        /* The AU must live in DirectMemory (ONION) — the GPU-side decoder
+         * DMA-reads it. .rodata AUs made EVERY spike decode return
+         * 0x811d0303 regardless of content (avc-ctrl proved it). */
+        void *au_m = NULL;
+        off_t au_o = 0;
+        size_t au_s = 0;
+        if (alloc_dmem(lens[i], ML_DMEM_TYPE_ONION, &au_m, &au_o, &au_s) < 0) {
+            LOGE("spike[%s]: AU alloc FAILED", label);
+            break;
+        }
+        memcpy(au_m, aus[i], lens[i]);
         OrbisVideodec2InputData in;
         memset(&in, 0, sizeof(in));
         in.thisSize = sizeof(in);
-        in.auData = (void *)aus[i];
+        in.auData = au_m;
         in.auSize = (uint64_t)lens[i];
         in.ptsData = 0;
         in.dtsData = 0;
         int rc3 = api->Decode(dec, &in, &fb, &out);
         LOGI("spike[%s]: Decode#%d (%zuB) => 0x%08x", label, i, lens[i],
              (unsigned)rc3);
+        sceKernelReleaseDirectMemory(au_o, au_s);
         if (rc3 != 0)
             break;
     }
@@ -724,16 +754,27 @@ static void spike_dec2_probe(const videodec2_api_t *api, const char *label,
         LOGI("spike[%s]: Flush => 0x%08x", label,
              (unsigned)api->Flush(dec, &fb, &out));
 
+    /* AU in DirectMemory (ONION) — required, see feed_probe note. */
+    void *au_m = NULL;
+    off_t au_o = 0;
+    size_t au_s = 0;
+    if (alloc_dmem(au_len, ML_DMEM_TYPE_ONION, &au_m, &au_o, &au_s) < 0) {
+        LOGE("spike[%s]: AU alloc FAILED", label);
+        goto out;
+    }
+    memcpy(au_m, au, au_len);
+
     OrbisVideodec2InputData in;
     memset(&in, 0, sizeof(in));
     in.thisSize = sizeof(in);
-    in.auData = (void *)au;
+    in.auData = au_m;
     in.auSize = (uint64_t)au_len;
     in.ptsData = 0;
     in.dtsData = 0;
     int rc3 = api->Decode(dec, &in, &fb, &out);
     LOGI("spike[%s]: Decode (%zuB, flags=%d) => 0x%08x", label, au_len,
          flags, (unsigned)rc3);
+    sceKernelReleaseDirectMemory(au_o, au_s);
 
     if (fb_m)
         sceKernelReleaseDirectMemory(fb_o, fb_s);
@@ -952,6 +993,18 @@ int videodec2_spike_run(void) {
             spike_dec2_probe(&api, "hevc-xcfg", 0, xcfg,
                              spike_au_real, sizeof(spike_au_real));
         }
+        /* Round 13: ONION-DirectMemory AUs (the .rodata bug invalidated
+         * every earlier spike decode) + AVC-fixup-equivalent HEVC SPS
+         * (dpb_minus1=0, reorder=0, latency=0). avc-ctrl MUST now pass. */
+        LOGI("=== videodec2 spike: decode acceptance matrix (r13) ===");
+        spike_dec2_probe(&api, "avc-ctrl", 1, NULL,
+                         spike_au_avc, sizeof(spike_au_avc));
+        spike_hevc_au_probe(&api, "hevc-real", 1, 100, 51, 4,
+                            spike_au_real, sizeof(spike_au_real));
+        spike_hevc_au_probe(&api, "hevc-dpb1", 1, 100, 51, 4,
+                            spike_au_dpb1, sizeof(spike_au_dpb1));
+        spike_hevc_au_probe(&api, "hevc-min2", 1, 100, 51, 4,
+                            spike_au_min2, sizeof(spike_au_min2));
         LOGI("=== videodec2 spike: decode acceptance DONE ===");
     }
 
