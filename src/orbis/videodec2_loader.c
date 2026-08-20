@@ -662,7 +662,10 @@ int videodec2_spike_run(void) {
     }
     {
         OrbisKernelModule core = -1;
-        int hrc = sceSysmoduleGetModuleHandleInternal(
+        /* SDK stub header declares this as void(); the real export is
+         * int sceSysmoduleGetModuleHandleInternal(int id, SceKernelModule*). */
+        typedef int (*get_mod_h_t)(int, OrbisKernelModule *);
+        int hrc = ((get_mod_h_t)sceSysmoduleGetModuleHandleInternal)(
             ORBIS_SYSMODULE_INTERNAL_VDECCORE, &core);
         LOGI("videodec2: VDECCORE handle => 0x%08x mod=%p", (unsigned)hrc,
              (void *)core);
