@@ -438,9 +438,9 @@ int nv12_to_bgra_tiled(uint8_t *dst, int pitch_pixels,
                 if (r < 0) r = 0; if (r > 255) r = 255;
                 if (g < 0) g = 0; if (g > 255) g = 255;
                 if (b < 0) b = 0; if (b > 255) b = 255;
-                int xb = k & 3;
-                int x4 = k & 4;
-                int off = ((y_sub & 6) << 5) | ((x4) << 3) | ((y_sub & 1) << 4) | (xb << 2);
+                int slot = (k & 1) | ((k >> 1 & 1) << 1) | ((y_sub & 1) << 2)
+                         | ((k >> 2 & 1) << 3) | ((y_sub >> 1 & 1) << 4) | ((y_sub >> 2 & 1) << 5);
+                int off = slot * 4;
                 tile[off + 0] = (uint8_t)b;
                 tile[off + 1] = (uint8_t)g;
                 tile[off + 2] = (uint8_t)r;
@@ -459,9 +459,9 @@ int nv12_to_bgra_tiled(uint8_t *dst, int pitch_pixels,
             if (b < 0) b = 0; if (b > 255) b = 255;
             int tile_col = x >> 3;
             uint8_t *tile = tile_band + (size_t)tile_col * 256u;
-            int xb = x & 3;
-            int x4 = x & 4;
-            int off = ((y_sub & 6) << 5) | ((x4) << 3) | ((y_sub & 1) << 4) | (xb << 2);
+            int slot = (x & 1) | ((x >> 1 & 1) << 1) | ((y_sub & 1) << 2)
+                     | ((x >> 2 & 1) << 3) | ((y_sub >> 1 & 1) << 4) | ((y_sub >> 2 & 1) << 5);
+            int off = slot * 4;
             tile[off + 0] = (uint8_t)b;
             tile[off + 1] = (uint8_t)g;
             tile[off + 2] = (uint8_t)r;
