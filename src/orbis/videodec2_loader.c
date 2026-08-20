@@ -698,8 +698,15 @@ static void spike_hevc_au_probe(const videodec2_api_t *api, const char *label,
 /* Round 12: structural variants + the AVC control. flags:
  * 1 = use generic CreateDecoder (AVC control), 2 = Reset before decode,
  * 4 = Flush before decode, 8 = no compute queue. */
+/* Round 16: codecType sweep at CREATE. The instance's codec routing (field
+ * +0x54, checked against 0x12384/0xb6c8 in the decode path) is derived from
+ * the codecType field. ct=1 (AVC) may route HEVC data to the AVC codec —
+ * which would explain the universal INVALID_SEQUENCE. ct=2 is rejected at
+ * create; 0/3/4/5 were never tested with a valid profile/level. Query keeps
+ * ct=1 (the only query-valid value); create sweeps. */
 static void spike_dec2_probe(const videodec2_api_t *api, const char *label,
                              int flags, const void *extra_cfg,
+                             uint32_t create_ct,
                              const uint8_t *au, size_t au_len) {
     OrbisVideodec2DecoderConfigInfo dc;
     videodec2_fill_decoder_config(&dc, api->queue, 1920, 1080);
@@ -740,6 +747,11 @@ static void spike_dec2_probe(const videodec2_api_t *api, const char *label,
     dm.gpuMemory = gpu_m;
     dm.cpuGpuMemory = cg_m;
 
+    dc.codecType = create_ct;
+    dc.profile = ORBIS_VIDEODEC2_PROFILE_HIGH;
+    dc.maxLevel = ORBIS_VIDEODEC2_LEVEL_51;
+    dc.maxDpbFrameCount = ORBIS_VIDEODEC2_DPB_DEFAULT;
+
     OrbisVideodec2Decoder dec = NULL;
     int rc2;
     if (flags & 1)
@@ -747,7 +759,8 @@ static void spike_dec2_probe(const videodec2_api_t *api, const char *label,
     else
         rc2 = api->CreateHevcDecoder(&dc, &dm, &dec);
     if (!dec || rc2 != 0) {
-        LOGI("spike[%s]: create(flags=%d) => 0x%08x", label, flags, (unsigned)rc2);
+        LOGI("spike[%s]: create(flags=%d ct=%u) => 0x%08x", label, flags,
+             (unsigned)create_ct, (unsigned)rc2);
         goto out;
     }
 
@@ -1001,27 +1014,27 @@ int videodec2_spike_run(void) {
          * generic AVC decoder + a hand-built valid AVC config AU — if the
          * spike invocation pattern is sound, this must return 0. */
         LOGI("=== videodec2 spike: decode acceptance matrix (r12) ===");
-        spike_dec2_probe(&api, "avc-ctrl", 1, NULL,
+        spike_dec2_probe(&api, "avc-ctrl", 1, NULL, 1,
                          spike_au_avc, sizeof(spike_au_avc));
-        spike_dec2_probe(&api, "hevc-repro", 0, NULL,
+        spike_dec2_probe(&api, "hevc-repro", 0, NULL, 1,
                          spike_au_real, sizeof(spike_au_real));
-        spike_dec2_probe(&api, "hevc-reset", 2, NULL,
+        spike_dec2_probe(&api, "hevc-reset", 2, NULL, 1,
                          spike_au_real, sizeof(spike_au_real));
-        spike_dec2_probe(&api, "hevc-flush", 4, NULL,
+        spike_dec2_probe(&api, "hevc-flush", 4, NULL, 1,
                          spike_au_real, sizeof(spike_au_real));
-        spike_dec2_probe(&api, "hevc-noq", 8, NULL,
+        spike_dec2_probe(&api, "hevc-noq", 8, NULL, 1,
                          spike_au_real, sizeof(spike_au_real));
         {
             uint8_t xcfg[0x40];
             memset(xcfg, 0, sizeof(xcfg));
-            spike_dec2_probe(&api, "hevc-xcfg", 0, xcfg,
+            spike_dec2_probe(&api, "hevc-xcfg", 0, xcfg, 1,
                              spike_au_real, sizeof(spike_au_real));
         }
         /* Round 13: ONION-DirectMemory AUs (the .rodata bug invalidated
          * every earlier spike decode) + AVC-fixup-equivalent HEVC SPS
          * (dpb_minus1=0, reorder=0, latency=0). avc-ctrl MUST now pass. */
         LOGI("=== videodec2 spike: decode acceptance matrix (r13) ===");
-        spike_dec2_probe(&api, "avc-ctrl", 1, NULL,
+        spike_dec2_probe(&api, "avc-ctrl", 1, NULL, 1,
                          spike_au_avc, sizeof(spike_au_avc));
         spike_hevc_au_probe(&api, "hevc-real", 1, 100, 51, 4,
                             spike_au_real, sizeof(spike_au_real));
@@ -1045,9 +1058,17 @@ int videodec2_spike_run(void) {
                     if (buf) {
                         size_t rd = fread(buf, 1, (size_t)flen, f);
                         LOGI("=== videodec2 spike: file AU (%zu bytes) ===", rd);
-                        spike_dec2_probe(&api, "file-au-hevc", 0, NULL,
+                        spike_dec2_probe(&api, "file-au-ct1", 0, NULL, 1,
                                          buf, rd);
-                        spike_dec2_probe(&api, "file-au-avc", 1, NULL,
+                        spike_dec2_probe(&api, "file-au-ct0", 0, NULL, 0,
+                                         buf, rd);
+                        spike_dec2_probe(&api, "file-au-ct3", 0, NULL, 3,
+                                         buf, rd);
+                        spike_dec2_probe(&api, "file-au-ct4", 0, NULL, 4,
+                                         buf, rd);
+                        spike_dec2_probe(&api, "file-au-ct5", 0, NULL, 5,
+                                         buf, rd);
+                        spike_dec2_probe(&api, "file-au-avc", 1, NULL, 1,
                                          buf, rd);
                         free(buf);
                     }
