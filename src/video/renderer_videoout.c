@@ -34,6 +34,7 @@ static int s_width, s_height, s_pitch;
 static int s_buf_h; /* height registered in VideoOut (1080); decoder may be 1088 */
 static int s_use_bgra;
 static int s_use_hdr; /* HDR10 present: A2R10G10B10_BT2020_PQ */
+static int s_tiled;  /* 1: TILE-mode buffers (DCE reads bpp×4 → hrep4) */
 static int s_plugin_ok;
 static int s_flip_logged;
 static int s_flip_mode = ML_VIDEO_OUT_FLIP_VSYNC;
@@ -415,12 +416,13 @@ static int switch_to_bgra(int w, int h) {
         /* 4K LINEAR hits the 8192-byte-pitch cap; TILED runs in a 64KB domain. */
         LOGW("present: BGRA LINEAR => 0x%08x; retry TILED", (unsigned)brc);
         brc = register_bgra(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_TILE);
+        s_tiled = 1;
     }
     if (brc < 0) {
         LOGE("present: fallback BGRA RegisterBuffers 0x%08x", (unsigned)brc);
         return -1;
     }
-    s_pitch = w * 4;
+    s_pitch = w * (s_tiled ? 16 : 4);
     s_buf_h = h;
     s_use_bgra = 1;
     s_fb_index = 0;
@@ -480,12 +482,13 @@ static int switch_to_hdr10(int w, int h) {
     if (hrc < 0) {
         LOGW("present: HDR10 LINEAR => 0x%08x; retry TILED", (unsigned)hrc);
         hrc = register_hdr10(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_TILE);
+        s_tiled = 1;
     }
     if (hrc < 0) {
         LOGE("present: HDR10 RegisterBuffers 0x%08x", (unsigned)hrc);
         return -1;
     }
-    s_pitch = w * 4; /* A2R10G10B10 = 4 B/px */
+    s_pitch = w * (s_tiled ? 16 : 4); /* A2R10G10B10 = 4 B/px; TILE ×4 */
     s_buf_h = h;
     s_use_bgra = 0;
     s_use_hdr = 1;
@@ -743,7 +746,8 @@ static void nv12_to_bgra_rows(uint8_t *dst, int dst_pitch, int w,
      * workers call this with row-aligned dst (pitch is 16B-multiple for
      * the registered buffers), so the AVX store is safe. Fall back to the
      * proven SSE2 kernel if AVX is unavailable (returns 0). */
-    if (nv12_to_bgra_avx(d, dst_pitch, yp, uvp, pitch_y, pitch_uv, w, h) == 1)
+    if (nv12_to_bgra_avx(d, dst_pitch, yp, uvp, pitch_y, pitch_uv, w, h,
+                         s_tiled) == 1)
         return;
     if ((((uintptr_t)d | (uintptr_t)(unsigned)dst_pitch) & 15u) != 0)
         nv12_to_bgra_impl(d, dst_pitch, w, h, yp, uvp, pitch_y, pitch_uv,
@@ -1072,9 +1076,10 @@ int video_present_init(int w, int h, int prefer_ycbcr, int hdr) {
         if (hrc < 0) {
             LOGW("present: HDR10 LINEAR => 0x%08x; retry TILED", (unsigned)hrc);
             hrc = register_hdr10(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_TILE);
+            s_tiled = 1;
         }
         if (hrc == 0) {
-            s_pitch = w * 4;
+            s_pitch = w * (s_tiled ? 16 : 4);
             s_buf_h = h;
             s_use_hdr = 1;
             s_fb_index = 0;
@@ -1560,7 +1565,7 @@ int video_present_frame(const uint8_t *y, const uint8_t *u, const uint8_t *v,
             /* Decoder NV12 (8-bit; Main10 arrives 10-bit P010 — handled by the
              * decoder's frameFormat detect in the future; v1 assumes 8-bit). */
             hdr10_convert_frame_avx(dst, s_pitch, y, src_uv, pitch_y,
-                                    src_uv_pitch, w, h, 0);
+                                    src_uv_pitch, w, h, 0, s_tiled);
         } else if (s_use_bgra) {
             /* Scale to fill the whole registered buffer (display resolution)
              * instead of clipping to min(h, s_buf_h): otherwise streaming at

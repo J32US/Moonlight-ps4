@@ -144,9 +144,10 @@ int hdr10_convert_frame(uint8_t *dst, int dst_pitch_bytes,
 }
 
 #if HAVE_SIMD
-/* 8 px → packed A2R10G10B10 (+ optional PQ LUT). */
+/* 8 px → packed A2R10G10B10 (+ optional PQ LUT). expand4: TILE-mode DCE
+ * reads bpp×4 — each pixel slot is 4× wide, so replicate every pixel ×4. */
 static inline void hdr10_store8(uint32_t *dp, const float rf[8], const float gf[8],
-                                const float bf[8]) {
+                                const float bf[8], int expand4) {
     for (int k = 0; k < 8; k++) {
         uint32_t ri = (uint32_t)(rf[k] + 0.5f);
         uint32_t gi = (uint32_t)(gf[k] + 0.5f);
@@ -159,7 +160,15 @@ static inline void hdr10_store8(uint32_t *dp, const float rf[8], const float gf[
             gi = s_pq_lut[gi];
             bi = s_pq_lut[bi];
         }
-        dp[k] = 0xC0000000u | (ri << 20) | (gi << 10) | bi;
+        uint32_t px = 0xC0000000u | (ri << 20) | (gi << 10) | bi;
+        if (expand4) {
+            dp[k * 4 + 0] = px;
+            dp[k * 4 + 1] = px;
+            dp[k * 4 + 2] = px;
+            dp[k * 4 + 3] = px;
+        } else {
+            dp[k] = px;
+        }
     }
 }
 
@@ -179,7 +188,8 @@ static inline void load8_u16_ps(const uint16_t *p, float out[8]) {
 
 __attribute__((target("avx")))
 static void hdr10_row_avx(uint32_t *drow, const uint8_t *yrow,
-                          const uint8_t *uvrow, int w, int is_10bit) {
+                          const uint8_t *uvrow, int w, int is_10bit,
+                          int expand4) {
     const __m256 m_sy = _mm256_set1_ps(1.0f / 876.0f);
     const __m256 m_sc = _mm256_set1_ps(1.0f / 896.0f);
     const __m256 m_64 = _mm256_set1_ps(64.0f);
@@ -230,23 +240,44 @@ static void hdr10_row_avx(uint32_t *drow, const uint8_t *yrow,
         _mm256_storeu_ps(rf, r);
         _mm256_storeu_ps(gf, g);
         _mm256_storeu_ps(bf, b);
-        hdr10_store8(drow + x, rf, gf, bf);
+        hdr10_store8(drow + (size_t)x * (expand4 ? 4 : 1), rf, gf, bf, expand4);
     }
-    if (x < w)
-        hdr10_row_scalar(drow, yrow, uvrow, x, w, is_10bit);
+    if (x < w) {
+        if (expand4) {
+            for (int xx = x; xx < w; xx++) {
+                int yv, uu, vv;
+                if (is_10bit) {
+                    yv = ((const uint16_t *)yrow)[xx];
+                    uu = ((const uint16_t *)uvrow)[xx & ~1];
+                    vv = ((const uint16_t *)uvrow)[(xx & ~1) + 1];
+                } else {
+                    yv = yrow[xx] << 2;
+                    uu = uvrow[(xx / 2) * 2] << 2;
+                    vv = uvrow[(xx / 2) * 2 + 1] << 2;
+                }
+                uint32_t px = yuv10_to_rgb10_pq(yv, uu, vv);
+                drow[xx * 4 + 0] = px;
+                drow[xx * 4 + 1] = px;
+                drow[xx * 4 + 2] = px;
+                drow[xx * 4 + 3] = px;
+            }
+        } else {
+            hdr10_row_scalar(drow, yrow, uvrow, x, w, is_10bit);
+        }
+    }
 }
 #endif
 
 int hdr10_convert_frame_avx(uint8_t *dst, int dst_pitch_bytes,
                             const uint8_t *y, const uint8_t *uv,
                             int pitch_y, int pitch_uv,
-                            int w, int h, int is_10bit) {
+                            int w, int h, int is_10bit, int expand4) {
 #if HAVE_SIMD
     for (int row = 0; row < h; row++) {
         uint32_t *drow = (uint32_t *)(void *)(dst + (size_t)row * (size_t)dst_pitch_bytes);
         const uint8_t *yrow = y + (size_t)row * (size_t)pitch_y;
         const uint8_t *uvrow = uv + (size_t)(row / 2) * (size_t)pitch_uv;
-        hdr10_row_avx(drow, yrow, uvrow, w, is_10bit);
+        hdr10_row_avx(drow, yrow, uvrow, w, is_10bit, expand4);
     }
     return 0;
 #else
@@ -265,7 +296,7 @@ int hdr10_convert_frame_avx(uint8_t *dst, int dst_pitch_bytes,
 #if HAVE_SIMD
 __attribute__((target("avx")))
 static void nv12_to_bgra_row_avx(uint8_t *drow, const uint8_t *yrow,
-                                 const uint8_t *uvrow, int w) {
+                                 const uint8_t *uvrow, int w, int expand4) {
     const __m256 m_128 = _mm256_set1_ps(128.0f);
     const __m256 m_rv = _mm256_set1_ps(179.0f / 128.0f);   /* 1.3984375 */
     const __m256 m_gu = _mm256_set1_ps(44.0f / 128.0f);    /* 0.34375   */
@@ -307,11 +338,22 @@ static void nv12_to_bgra_row_avx(uint8_t *drow, const uint8_t *yrow,
             if (ri > 255) ri = 255;
             if (gi > 255) gi = 255;
             if (bi > 255) bi = 255;
-            /* BGRA: B,G,R,A */
-            drow[(x + k) * 4 + 0] = (uint8_t)bi;
-            drow[(x + k) * 4 + 1] = (uint8_t)gi;
-            drow[(x + k) * 4 + 2] = (uint8_t)ri;
-            drow[(x + k) * 4 + 3] = 0xFF;
+            /* BGRA: B,G,R,A. expand4: TILE-mode DCE reads bpp×4. */
+            uint8_t b0 = (uint8_t)bi, g0 = (uint8_t)gi, r0 = (uint8_t)ri;
+            if (expand4) {
+                uint8_t *p = drow + (size_t)(x + k) * 16;
+                for (int e = 0; e < 4; e++) {
+                    p[e * 4 + 0] = b0;
+                    p[e * 4 + 1] = g0;
+                    p[e * 4 + 2] = r0;
+                    p[e * 4 + 3] = 0xFF;
+                }
+            } else {
+                drow[(x + k) * 4 + 0] = b0;
+                drow[(x + k) * 4 + 1] = g0;
+                drow[(x + k) * 4 + 2] = r0;
+                drow[(x + k) * 4 + 3] = 0xFF;
+            }
         }
     }
     for (; x < w; x++) {
@@ -324,10 +366,20 @@ static void nv12_to_bgra_row_avx(uint8_t *drow, const uint8_t *yrow,
         if (r < 0) r = 0; if (r > 255) r = 255;
         if (g < 0) g = 0; if (g > 255) g = 255;
         if (b < 0) b = 0; if (b > 255) b = 255;
-        drow[x * 4 + 0] = (uint8_t)b;
-        drow[x * 4 + 1] = (uint8_t)g;
-        drow[x * 4 + 2] = (uint8_t)r;
-        drow[x * 4 + 3] = 0xFF;
+        if (expand4) {
+            uint8_t *p = drow + (size_t)x * 16;
+            for (int e = 0; e < 4; e++) {
+                p[e * 4 + 0] = (uint8_t)b;
+                p[e * 4 + 1] = (uint8_t)g;
+                p[e * 4 + 2] = (uint8_t)r;
+                p[e * 4 + 3] = 0xFF;
+            }
+        } else {
+            drow[x * 4 + 0] = (uint8_t)b;
+            drow[x * 4 + 1] = (uint8_t)g;
+            drow[x * 4 + 2] = (uint8_t)r;
+            drow[x * 4 + 3] = 0xFF;
+        }
     }
 }
 
@@ -335,12 +387,12 @@ __attribute__((target("avx")))
 int nv12_to_bgra_avx(uint8_t *dst, int dst_pitch,
                      const uint8_t *y, const uint8_t *uv,
                      int pitch_y, int pitch_uv,
-                     int w, int h) {
+                     int w, int h, int expand4) {
     for (int row = 0; row < h; row++) {
         uint8_t *drow = dst + (size_t)row * (size_t)dst_pitch;
         const uint8_t *yrow = y + (size_t)row * (size_t)pitch_y;
         const uint8_t *uvrow = uv + (size_t)(row / 2) * (size_t)pitch_uv;
-        nv12_to_bgra_row_avx(drow, yrow, uvrow, w);
+        nv12_to_bgra_row_avx(drow, yrow, uvrow, w, expand4);
     }
     return 1;
 }

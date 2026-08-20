@@ -23,18 +23,20 @@ int hdr10_convert_frame_ref(uint8_t *dst, int dst_pitch_bytes,
                             int pitch_y, int pitch_uv,
                             int w, int h, int is_10bit);
 
-/* AVX1-accelerated variant (falls back to scalar when no AVX). */
+/* AVX1-accelerated variant (falls back to scalar when no AVX).
+ * expand4: TILE-mode DCE reads bpp×4 — replicate each pixel ×4 (hrep4). */
 int hdr10_convert_frame_avx(uint8_t *dst, int dst_pitch_bytes,
                             const uint8_t *y, const uint8_t *uv,
                             int pitch_y, int pitch_uv,
-                            int w, int h, int is_10bit);
+                            int w, int h, int is_10bit, int expand4);
 
 /* SDR NV12 -> BGRA (A8R8G8B8) AVX1 kernel. dst_pitch in BYTES.
+ * expand4: TILE-mode DCE reads bpp×4 — replicate each pixel ×4 (hrep4).
  * Returns 1 if AVX ran, 0 if unavailable (caller falls back to SSE2). */
 int nv12_to_bgra_avx(uint8_t *dst, int dst_pitch,
                      const uint8_t *y, const uint8_t *uv,
                      int pitch_y, int pitch_uv,
-                     int w, int h);
+                     int w, int h, int expand4);
 
 #ifdef __cplusplus
 }
