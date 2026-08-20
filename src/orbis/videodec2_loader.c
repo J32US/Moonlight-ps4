@@ -514,6 +514,10 @@ static const uint8_t spike_au_x265_novps[66] = {
     0x01, 0x00, 0x07, 0x00, 0x00, 0x00, 0x01, 0x44, 0x01, 0xc1, 0x72, 0xb4,
     0x22, 0x40, 0x00, 0x00, 0x00, 0x00
 };
+static const uint8_t spike_au_avc[23] = {
+    0x00, 0x00, 0x00, 0x01, 0x67, 0x64, 0x00, 0x2a, 0xa6, 0x3b, 0x40, 0x3c,
+    0x01, 0x13, 0x20, 0x00, 0x00, 0x00, 0x01, 0x68, 0xce, 0x3c, 0x80
+};
 static const uint8_t spike_nal_vps[24] = {
     0x40, 0x01, 0x0c, 0x01, 0xff, 0xff, 0x21, 0x60, 0x00, 0x00, 0x03, 0x00,
     0x90, 0x00, 0x00, 0x03, 0x00, 0x00, 0x03, 0x00, 0x7b, 0xba, 0x02, 0x40
@@ -635,6 +639,110 @@ static void spike_hevc_au_probe(const videodec2_api_t *api, const char *label,
     const size_t lens[1] = { au_len };
     spike_hevc_feed_probe(api, label, codecType, profile, level, dpb,
                           aus, lens, 1);
+}
+
+/* Round 12: structural variants + the AVC control. flags:
+ * 1 = use generic CreateDecoder (AVC control), 2 = Reset before decode,
+ * 4 = Flush before decode, 8 = no compute queue. */
+static void spike_dec2_probe(const videodec2_api_t *api, const char *label,
+                             int flags, const void *extra_cfg,
+                             const uint8_t *au, size_t au_len) {
+    OrbisVideodec2DecoderConfigInfo dc;
+    videodec2_fill_decoder_config(&dc, api->queue, 1920, 1080);
+    dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED;
+    dc.codecType = ORBIS_VIDEODEC2_CODEC_AVC;
+    dc.profile = ORBIS_VIDEODEC2_PROFILE_HIGH;
+    dc.maxLevel = ORBIS_VIDEODEC2_LEVEL_51;
+    dc.maxDpbFrameCount = ORBIS_VIDEODEC2_DPB_DEFAULT;
+    if (flags & 8)
+        dc.computeQueue = NULL;
+    if (extra_cfg)
+        dc.extraConfigInfo = (void *)extra_cfg;
+
+    OrbisVideodec2DecoderMemoryInfo dm;
+    memset(&dm, 0, sizeof(dm));
+    dm.thisSize = sizeof(dm);
+    int rc = api->QueryHevcDecoderMemoryInfo(&dc, &dm);
+    if (rc != 0) {
+        LOGI("spike[%s]: query => 0x%08x (skip)", label, (unsigned)rc);
+        return;
+    }
+    void *cpu_m = NULL, *gpu_m = NULL, *cg_m = NULL;
+    off_t cpu_o = 0, gpu_o = 0, cg_o = 0;
+    size_t cpu_s = 0, gpu_s = 0, cg_s = 0;
+    if ((dm.cpuMemorySize &&
+         alloc_dmem((size_t)dm.cpuMemorySize, ML_DMEM_TYPE_ONION,
+                    &cpu_m, &cpu_o, &cpu_s) < 0) ||
+        (dm.gpuMemorySize &&
+         alloc_dmem((size_t)dm.gpuMemorySize, ML_DMEM_TYPE_GARLIC,
+                    &gpu_m, &gpu_o, &gpu_s) < 0) ||
+        (dm.cpuGpuMemorySize &&
+         alloc_dmem((size_t)dm.cpuGpuMemorySize, ML_DMEM_TYPE_ONION,
+                    &cg_m, &cg_o, &cg_s) < 0)) {
+        LOGE("spike[%s]: alloc FAILED", label);
+        goto out;
+    }
+    dm.cpuMemory = cpu_m;
+    dm.gpuMemory = gpu_m;
+    dm.cpuGpuMemory = cg_m;
+
+    OrbisVideodec2Decoder dec = NULL;
+    int rc2;
+    if (flags & 1)
+        rc2 = api->CreateDecoder(&dc, &dm, &dec);
+    else
+        rc2 = api->CreateHevcDecoder(&dc, &dm, &dec);
+    if (!dec || rc2 != 0) {
+        LOGI("spike[%s]: create(flags=%d) => 0x%08x", label, flags, (unsigned)rc2);
+        goto out;
+    }
+
+    void *fb_m = NULL;
+    off_t fb_o = 0;
+    size_t fb_s = 0;
+    if (dm.maxFrameBufferSize &&
+        alloc_dmem((size_t)dm.maxFrameBufferSize, ML_DMEM_TYPE_ONION,
+                   &fb_m, &fb_o, &fb_s) < 0) {
+        LOGE("spike[%s]: fb alloc FAILED", label);
+        goto out;
+    }
+
+    OrbisVideodec2FrameBuffer fb;
+    memset(&fb, 0, sizeof(fb));
+    fb.thisSize = sizeof(fb);
+    fb.frameBuffer = fb_m;
+    fb.frameBufferSize = (uint64_t)fb_s;
+
+    OrbisVideodec2OutputInfo out;
+    memset(&out, 0, sizeof(out));
+    out.thisSize = sizeof(out);
+
+    if ((flags & 2) && api->Reset)
+        LOGI("spike[%s]: Reset => 0x%08x", label,
+             (unsigned)api->Reset(dec));
+    if ((flags & 4) && api->Flush)
+        LOGI("spike[%s]: Flush => 0x%08x", label,
+             (unsigned)api->Flush(dec, &fb, &out));
+
+    OrbisVideodec2InputData in;
+    memset(&in, 0, sizeof(in));
+    in.thisSize = sizeof(in);
+    in.auData = (void *)au;
+    in.auSize = (uint64_t)au_len;
+    in.ptsData = 0;
+    in.dtsData = 0;
+    int rc3 = api->Decode(dec, &in, &fb, &out);
+    LOGI("spike[%s]: Decode (%zuB, flags=%d) => 0x%08x", label, au_len,
+         flags, (unsigned)rc3);
+
+    if (fb_m)
+        sceKernelReleaseDirectMemory(fb_o, fb_s);
+    if (api->DeleteDecoder)
+        api->DeleteDecoder(dec);
+out:
+    if (cpu_m) sceKernelReleaseDirectMemory(cpu_o, cpu_s);
+    if (gpu_m) sceKernelReleaseDirectMemory(gpu_o, gpu_s);
+    if (cg_m) sceKernelReleaseDirectMemory(cg_o, cg_s);
 }
 
 static void spike_dump_module(const char *label, OrbisKernelModule mod,
@@ -823,6 +931,26 @@ int videodec2_spike_run(void) {
                                      sizeof(spike_nal_pps) };
             spike_hevc_feed_probe(&api, "seq-VPS/SPS/PPS", 1, 100, 51, 4,
                                   seq, seql, 3);
+        }
+        /* Round 12: AVC control + structural variants. avc-ctrl uses the
+         * generic AVC decoder + a hand-built valid AVC config AU — if the
+         * spike invocation pattern is sound, this must return 0. */
+        LOGI("=== videodec2 spike: decode acceptance matrix (r12) ===");
+        spike_dec2_probe(&api, "avc-ctrl", 1, NULL,
+                         spike_au_avc, sizeof(spike_au_avc));
+        spike_dec2_probe(&api, "hevc-repro", 0, NULL,
+                         spike_au_real, sizeof(spike_au_real));
+        spike_dec2_probe(&api, "hevc-reset", 2, NULL,
+                         spike_au_real, sizeof(spike_au_real));
+        spike_dec2_probe(&api, "hevc-flush", 4, NULL,
+                         spike_au_real, sizeof(spike_au_real));
+        spike_dec2_probe(&api, "hevc-noq", 8, NULL,
+                         spike_au_real, sizeof(spike_au_real));
+        {
+            uint8_t xcfg[0x40];
+            memset(xcfg, 0, sizeof(xcfg));
+            spike_dec2_probe(&api, "hevc-xcfg", 0, xcfg,
+                             spike_au_real, sizeof(spike_au_real));
         }
         LOGI("=== videodec2 spike: decode acceptance DONE ===");
     }
