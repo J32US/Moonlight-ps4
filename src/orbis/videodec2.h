@@ -7,12 +7,18 @@
 #include <string.h>
 
 #define ORBIS_VIDEODEC2_CODEC_AVC 1
+#define ORBIS_VIDEODEC2_CODEC_HEVC 2 /* UNVERIFIED on console — Task 1.3 spike */
 
 // Validated on console: resourceType=0 → 0x811D0203; without profile/level → 0x811D0205;
 // cpuThreadPriority=16 → 0x811D0208.
 #define ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED 1u
 #define ORBIS_VIDEODEC2_PROFILE_HIGH           100u
 #define ORBIS_VIDEODEC2_LEVEL_51               51u
+#define ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN      200u /* UNVERIFIED — spike */
+#define ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN10    202u /* UNVERIFIED — spike */
+#define ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51      153u /* HEVC L5.1 = 4K60 */
+#define ORBIS_VIDEODEC2_DPB_DEFAULT            4    /* AVC + 1080p HEVC */
+#define ORBIS_VIDEODEC2_DPB_HEVC_4K            6    /* HEVC L5.1 4K min DPB */
 #define ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT    700
 #define ORBIS_VIDEODEC2_AFFINITY_ALL           0x3Full
 
@@ -106,7 +112,8 @@ typedef void *OrbisVideodec2ComputeQueue;
 static inline void videodec2_fill_decoder_config_ex(OrbisVideodec2DecoderConfigInfo *dc,
                                                     OrbisVideodec2ComputeQueue q,
                                                     int w, int h,
-                                                    int pipelineDepth, int cpuPriority) {
+                                                    int pipelineDepth, int cpuPriority,
+                                                    uint32_t codecType, uint32_t profile) {
     if (pipelineDepth < 1)
         pipelineDepth = 1;
     if (pipelineDepth > ORBIS_VIDEODEC2_MAX_PIPELINE_DEPTH)
@@ -117,14 +124,17 @@ static inline void videodec2_fill_decoder_config_ex(OrbisVideodec2DecoderConfigI
     memset(dc, 0, sizeof(*dc));
     dc->thisSize = sizeof(*dc);
     dc->resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED;
-    dc->codecType = ORBIS_VIDEODEC2_CODEC_AVC;
-    dc->profile = ORBIS_VIDEODEC2_PROFILE_HIGH;
-    dc->maxLevel = ORBIS_VIDEODEC2_LEVEL_51;
+    dc->codecType = codecType;
+    dc->profile = profile;
+    /* HEVC level_idc is 3-digit (L5.1 = 153); AVC is 2-digit (5.1 = 51). */
+    dc->maxLevel = (codecType == ORBIS_VIDEODEC2_CODEC_HEVC)
+        ? ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51 : ORBIS_VIDEODEC2_LEVEL_51;
     dc->maxFrameWidth = w;
     /* 1088: macroblock-align; 1080 in config → slow Decode / rare paths. */
     dc->maxFrameHeight = (h + 15) & ~15;
     /* dpb=1 + stream with refs → Decode ~150ms and IDR storm. 4 = typical NVENC. */
-    dc->maxDpbFrameCount = 4;
+    dc->maxDpbFrameCount = (codecType == ORBIS_VIDEODEC2_CODEC_HEVC && w >= 3840)
+        ? ORBIS_VIDEODEC2_DPB_HEVC_4K : ORBIS_VIDEODEC2_DPB_DEFAULT;
     /* depth=1 serialises submit→wait against the compute queue every frame. */
     dc->decodePipelineDepth = (uint32_t)pipelineDepth;
     dc->computeQueue = q;
@@ -139,7 +149,9 @@ static inline void videodec2_fill_decoder_config(OrbisVideodec2DecoderConfigInfo
                                                    OrbisVideodec2ComputeQueue q,
                                                    int w, int h) {
     videodec2_fill_decoder_config_ex(dc, q, w, h, 1,
-                                     ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT);
+                                     ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT,
+                                     ORBIS_VIDEODEC2_CODEC_AVC,
+                                     ORBIS_VIDEODEC2_PROFILE_HIGH);
 }
 
 typedef int32_t (*sceVideodec2QueryComputeMemoryInfo_t)(OrbisVideodec2ComputeMemoryInfo *);

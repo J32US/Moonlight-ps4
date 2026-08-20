@@ -8,6 +8,9 @@
 #define CONFIG_MAX_HOST 128
 #define CONFIG_MAX_APP  128
 
+/* Negotiated codec. H264 = stock behaviour; HEVC/AUTO = Phase 1 mod. */
+enum { CODEC_H264 = 0, CODEC_HEVC, CODEC_AUTO };
+
 typedef struct {
     STREAM_CONFIGURATION stream; // embedded: width/height/fps/bitrate/...
 
@@ -20,6 +23,7 @@ typedef struct {
     bool prefer_hw;
     bool videodec2_spike;
     bool prefer_ycbcr;
+    int codec; // CODEC_*: h264 (stock) / hevc / auto (advertise both)
     bool enable_file_log; // writes /data/moonlight/debug.log
     bool show_stats; // on-screen perf overlay (FPS/decode/convert/present/KB per frame)
     bool paired_ok; // runtime only
@@ -37,6 +41,7 @@ typedef struct {
 } app_config_t;
 
 void config_set_defaults(app_config_t *cfg);
+void config_apply_codec(app_config_t *cfg);
 void config_ensure_dir(const char *dir);
 int config_load(app_config_t *cfg, const char *dir);
 int config_save(const app_config_t *cfg, const char *dir);

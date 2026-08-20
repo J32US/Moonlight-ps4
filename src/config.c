@@ -24,7 +24,8 @@ void config_set_defaults(app_config_t *cfg) {
     cfg->stream.packetSize = 1392;
     cfg->stream.streamingRemotely = STREAM_CFG_LOCAL;
     cfg->stream.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
-    cfg->stream.supportedVideoFormats = VIDEO_FORMAT_H264;
+    cfg->codec = CODEC_H264;
+    config_apply_codec(cfg);
     cfg->stream.encryptionFlags = ENCFLG_NONE;
     cfg->stream.colorSpace = COLORSPACE_REC_709;
     cfg->stream.colorRange = COLOR_RANGE_LIMITED;
@@ -68,6 +69,21 @@ static char *trim(char *s) {
 
 static int parse_bool(const char *v) {
     return !strcasecmp(v, "true") || !strcmp(v, "1") || !strcasecmp(v, "yes");
+}
+
+void config_apply_codec(app_config_t *cfg) {
+    switch (cfg->codec) {
+    case CODEC_HEVC:
+        cfg->stream.supportedVideoFormats = VIDEO_FORMAT_H265;
+        break;
+    case CODEC_AUTO:
+        cfg->stream.supportedVideoFormats = VIDEO_FORMAT_H264 | VIDEO_FORMAT_H265;
+        break;
+    default:
+        cfg->codec = CODEC_H264;
+        cfg->stream.supportedVideoFormats = VIDEO_FORMAT_H264;
+        break;
+    }
 }
 
 int config_load(app_config_t *cfg, const char *dir) {
@@ -143,6 +159,15 @@ int config_load(app_config_t *cfg, const char *dir) {
             cfg->videodec2_spike = parse_bool(val);
         else if (!strcmp(key, "prefer_ycbcr"))
             cfg->prefer_ycbcr = parse_bool(val);
+        else if (!strcmp(key, "codec")) {
+            if (!strcasecmp(val, "hevc"))
+                cfg->codec = CODEC_HEVC;
+            else if (!strcasecmp(val, "auto"))
+                cfg->codec = CODEC_AUTO;
+            else
+                cfg->codec = CODEC_H264;
+            config_apply_codec(cfg);
+        }
         else if (!strcmp(key, "enable_file_log"))
             cfg->enable_file_log = parse_bool(val);
         else if (!strcmp(key, "show_stats"))
@@ -183,10 +208,11 @@ int config_load(app_config_t *cfg, const char *dir) {
         cfg->dec_au_onion = true;
     }
 
-    LOGI("config: host=%s app=%s debug=%s %dx%d@%d br=%d pkt=%d hw=%d ycbcr=%d file_log=%d",
+    LOGI("config: host=%s app=%s debug=%s %dx%d@%d br=%d pkt=%d hw=%d ycbcr=%d codec=%d fmt=0x%x file_log=%d",
          cfg->host, cfg->app_name, cfg->debug_host,
          cfg->stream.width, cfg->stream.height, cfg->stream.fps, cfg->stream.bitrate,
-         cfg->stream.packetSize, cfg->prefer_hw, cfg->prefer_ycbcr,
+         cfg->stream.packetSize, cfg->prefer_hw, cfg->prefer_ycbcr, cfg->codec,
+         cfg->stream.supportedVideoFormats,
          cfg->enable_file_log);
     return 0;
 }
@@ -216,6 +242,7 @@ int config_save(const app_config_t *cfg, const char *dir) {
             "prefer_hw = %s\n"
             "videodec2_spike = %s\n"
             "prefer_ycbcr = %s\n"
+            "codec = %s\n"
             "enable_file_log = %s\n"
             "show_stats = %s\n"
             "dec_pipeline_depth = %d\n"
@@ -233,6 +260,8 @@ int config_save(const app_config_t *cfg, const char *dir) {
             cfg->prefer_hw ? "true" : "false",
             cfg->videodec2_spike ? "true" : "false",
             cfg->prefer_ycbcr ? "true" : "false",
+            cfg->codec == CODEC_HEVC ? "hevc" :
+                (cfg->codec == CODEC_AUTO ? "auto" : "h264"),
             cfg->enable_file_log ? "true" : "false",
             cfg->show_stats ? "true" : "false",
             cfg->dec_pipeline_depth, cfg->dec_thread_prio, cfg->slices_per_frame,

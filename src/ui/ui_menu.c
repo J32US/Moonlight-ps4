@@ -88,6 +88,7 @@ enum {
     SET_LOCAL_AUDIO,
     SET_PREFER_HW,
     SET_PREFER_YCBCR,
+    SET_CODEC,
     SET_FILE_LOG,
     SET_SHOW_STATS,
     SET_COUNT,
@@ -103,6 +104,7 @@ static const char *k_set_names[SET_COUNT] = {
     "Local audio",
     "Decoder HW",
     "YCbCr (experimental)",
+    "Codec",
     "File logging",
     "Perf overlay",
 };
@@ -219,6 +221,9 @@ static void set_value_str(const ui_state_t *st, int row, char *out, size_t cap) 
     case SET_LOCAL_AUDIO: snprintf(out, cap, "%s", c->local_audio ? "yes" : "no"); break;
     case SET_PREFER_HW:   snprintf(out, cap, "%s", c->prefer_hw ? "yes" : "no"); break;
     case SET_PREFER_YCBCR:snprintf(out, cap, "%s", c->prefer_ycbcr ? "yes" : "no"); break;
+    case SET_CODEC:       snprintf(out, cap, "%s",
+                                   c->codec == CODEC_HEVC ? "hevc" :
+                                   (c->codec == CODEC_AUTO ? "auto" : "h264")); break;
     case SET_FILE_LOG:    snprintf(out, cap, "%s", c->enable_file_log ? "yes" : "no"); break;
     case SET_SHOW_STATS:  snprintf(out, cap, "%s", c->show_stats ? "yes" : "no"); break;
     default: out[0] = '\0'; break;
@@ -382,6 +387,14 @@ static void settings_input(ui_state_t *st, unsigned pr) {
     case SET_LOCAL_AUDIO: c->local_audio = !c->local_audio; break;
     case SET_PREFER_HW:   c->prefer_hw = !c->prefer_hw; break;
     case SET_PREFER_YCBCR:c->prefer_ycbcr = !c->prefer_ycbcr; break;
+    case SET_CODEC: {
+        int n = c->codec + (dir ? dir : 1);
+        if (n > CODEC_AUTO) n = CODEC_H264;
+        if (n < CODEC_H264) n = CODEC_AUTO;
+        c->codec = n;
+        config_apply_codec(c);
+        break;
+    }
     case SET_FILE_LOG:
         c->enable_file_log = !c->enable_file_log;
         {
