@@ -169,6 +169,10 @@ typedef int32_t (*sceVideodec2CreateDecoder_t)(const OrbisVideodec2DecoderConfig
 typedef int32_t (*sceVideodec2CreateHevcDecoder_t)(const OrbisVideodec2DecoderConfigInfo *,
                                                    const OrbisVideodec2DecoderMemoryInfo *,
                                                    OrbisVideodec2Decoder *);
+typedef int32_t (*sceVideodec2QueryHevcDecoderMemoryInfo_t)(const OrbisVideodec2DecoderConfigInfo *,
+                                                            OrbisVideodec2DecoderMemoryInfo *);
+typedef int32_t (*sceVideodec2GetHevcPictureInfo_t)(const OrbisVideodec2OutputInfo *,
+                                                    void *, void *);
 typedef int32_t (*sceVideodec2DeleteDecoder_t)(OrbisVideodec2Decoder);
 typedef int32_t (*sceVideodec2Decode_t)(OrbisVideodec2Decoder,
                                         const OrbisVideodec2InputData *,
@@ -188,6 +192,8 @@ typedef struct {
     sceVideodec2QueryDecoderMemoryInfo_t QueryDecoderMemoryInfo;
     sceVideodec2CreateDecoder_t CreateDecoder;
     sceVideodec2CreateHevcDecoder_t CreateHevcDecoder; /* nullable: FW w/o HEVC */
+    sceVideodec2QueryHevcDecoderMemoryInfo_t QueryHevcDecoderMemoryInfo; /* nullable */
+    sceVideodec2GetHevcPictureInfo_t GetHevcPictureInfo;                /* nullable */
     sceVideodec2DeleteDecoder_t DeleteDecoder;
     sceVideodec2Decode_t Decode;
     sceVideodec2Flush_t Flush;
