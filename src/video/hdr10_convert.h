@@ -38,6 +38,13 @@ int nv12_to_bgra_avx(uint8_t *dst, int dst_pitch,
                      int pitch_y, int pitch_uv,
                      int w, int h, int expand4);
 
+/* SDR NV12 -> BGRA written in GCN 8x8 microtile order (DCE TILED buffers).
+ * pitch_pixels = the registered pixel pitch (attr width). Returns 1. */
+int nv12_to_bgra_tiled(uint8_t *dst, int pitch_pixels,
+                       const uint8_t *y, const uint8_t *uv,
+                       int pitch_y, int pitch_uv,
+                       int w, int h);
+
 #ifdef __cplusplus
 }
 #endif

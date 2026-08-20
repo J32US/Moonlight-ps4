@@ -425,7 +425,7 @@ static int switch_to_bgra(int w, int h) {
         LOGE("present: fallback BGRA RegisterBuffers 0x%08x", (unsigned)brc);
         return -1;
     }
-    s_pitch = w * (s_tiled ? 16 : 4);
+    s_pitch = w * (s_tiled ? 4 : 4); /* TILED: DCE macro-row stride handled in writer */
     s_buf_h = h;
     s_use_bgra = 1;
     s_fb_index = 0;
@@ -492,7 +492,7 @@ static int switch_to_hdr10(int w, int h) {
         LOGE("present: HDR10 RegisterBuffers 0x%08x", (unsigned)hrc);
         return -1;
     }
-    s_pitch = w * (s_tiled ? 16 : 4); /* A2R10G10B10 = 4 B/px; TILE ×4 */
+    s_pitch = w * 4; /* A2R10G10B10 = 4 B/px */
     s_buf_h = h;
     s_use_bgra = 0;
     s_use_hdr = 1;
@@ -746,12 +746,16 @@ static void nv12_to_bgra_rows(uint8_t *dst, int dst_pitch, int w,
     const uint8_t *yp = y + (size_t)row0 * (size_t)pitch_y;
     const uint8_t *uvp = uv + (size_t)(row0 / 2) * (size_t)pitch_uv;
     int h = row1 - row0;
+    /* TILED present: write GCN microtile order (not linear). */
+    if (s_tiled) {
+        (void)nv12_to_bgra_tiled(d, w, yp, uvp, pitch_y, pitch_uv, w, h);
+        return;
+    }
     /* AVX1 (8 px float) — fast path for the common 1:1 case; the band
      * workers call this with row-aligned dst (pitch is 16B-multiple for
      * the registered buffers), so the AVX store is safe. Fall back to the
      * proven SSE2 kernel if AVX is unavailable (returns 0). */
-    if (nv12_to_bgra_avx(d, dst_pitch, yp, uvp, pitch_y, pitch_uv, w, h,
-                         s_tiled) == 1)
+    if (nv12_to_bgra_avx(d, dst_pitch, yp, uvp, pitch_y, pitch_uv, w, h, 0) == 1)
         return;
     if ((((uintptr_t)d | (uintptr_t)(unsigned)dst_pitch) & 15u) != 0)
         nv12_to_bgra_impl(d, dst_pitch, w, h, yp, uvp, pitch_y, pitch_uv,
@@ -1084,7 +1088,7 @@ int video_present_init(int w, int h, int prefer_ycbcr, int hdr) {
             s_tiled = 1;
         }
         if (hrc == 0) {
-            s_pitch = w * (s_tiled ? 16 : 4);
+            s_pitch = w * 4;
             s_buf_h = h;
             s_use_hdr = 1;
             s_fb_index = 0;

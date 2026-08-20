@@ -398,3 +398,76 @@ int nv12_to_bgra_avx(uint8_t *dst, int dst_pitch,
 }
 #endif
 
+
+#if HAVE_SIMD
+/* ---------------------------------------------------------------------------
+ * TILED (GCN microtile) BGRA writer for the DCE.
+ * The kernel TILED register path accepts 4K (LINEAR caps at 8192 B pitch).
+ * The DCE reads tiled buffers in 8x8-pixel microtiles, 32bpp, with the
+ * standard AMD GCN swizzle (bit-interleaved within an 8x8 tile = 256 B):
+ *   byte_in_tile = ((y&6)<<5) | ((x&4)<<3) | ((y&1)<<4) | ((x&3)<<2)
+ * Macro layout: tile rows of 8 display rows; tiles row-major across the
+ * registered pitch. Tile-row stride = (pitch_pixels/8) * 256 bytes.
+ * The buffer holds the SAME byte count as linear (tiling packs, no 4x).
+ * ------------------------------------------------------------------------ */
+__attribute__((target("avx")))
+int nv12_to_bgra_tiled(uint8_t *dst, int pitch_pixels,
+                       const uint8_t *y, const uint8_t *uv,
+                       int pitch_y, int pitch_uv,
+                       int w, int h) {
+    const int tiles_per_row = pitch_pixels / 8;   /* 8 px per microtile */
+    const int tile_row_stride = tiles_per_row * 256;
+    for (int row = 0; row < h; row++) {
+        int tile_row = row >> 3;
+        int y_sub = row & 7;
+        uint8_t *tile_band = dst + (size_t)tile_row * (size_t)tile_row_stride;
+        const uint8_t *yrow = y + (size_t)row * (size_t)pitch_y;
+        const uint8_t *uvrow = uv + (size_t)(row / 2) * (size_t)pitch_uv;
+        int x = 0;
+        for (; x + 7 < w; x += 8) {
+            int tile_col = x >> 3;
+            uint8_t *tile = tile_band + (size_t)tile_col * 256u;
+            for (int k = 0; k < 8; k++) {
+                int px = x + k;
+                int yy = yrow[px];
+                int uu = (int)uvrow[(px / 2) * 2] - 128;
+                int vv = (int)uvrow[(px / 2) * 2 + 1] - 128;
+                int r = yy + ((179 * vv) >> 7);
+                int g = yy - ((44 * uu + 92 * vv) >> 7);
+                int b = yy + ((227 * uu) >> 7);
+                if (r < 0) r = 0; if (r > 255) r = 255;
+                if (g < 0) g = 0; if (g > 255) g = 255;
+                if (b < 0) b = 0; if (b > 255) b = 255;
+                int xb = k & 3;
+                int x4 = k & 4;
+                int off = ((y_sub & 6) << 5) | ((x4) << 3) | ((y_sub & 1) << 4) | (xb << 2);
+                tile[off + 0] = (uint8_t)b;
+                tile[off + 1] = (uint8_t)g;
+                tile[off + 2] = (uint8_t)r;
+                tile[off + 3] = 0xFF;
+            }
+        }
+        for (; x < w; x++) {
+            int yy = yrow[x];
+            int uu = (int)uvrow[(x / 2) * 2] - 128;
+            int vv = (int)uvrow[(x / 2) * 2 + 1] - 128;
+            int r = yy + ((179 * vv) >> 7);
+            int g = yy - ((44 * uu + 92 * vv) >> 7);
+            int b = yy + ((227 * uu) >> 7);
+            if (r < 0) r = 0; if (r > 255) r = 255;
+            if (g < 0) g = 0; if (g > 255) g = 255;
+            if (b < 0) b = 0; if (b > 255) b = 255;
+            int tile_col = x >> 3;
+            uint8_t *tile = tile_band + (size_t)tile_col * 256u;
+            int xb = x & 3;
+            int x4 = x & 4;
+            int off = ((y_sub & 6) << 5) | ((x4) << 3) | ((y_sub & 1) << 4) | (xb << 2);
+            tile[off + 0] = (uint8_t)b;
+            tile[off + 1] = (uint8_t)g;
+            tile[off + 2] = (uint8_t)r;
+            tile[off + 3] = 0xFF;
+        }
+    }
+    return 1;
+}
+#endif
