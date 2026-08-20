@@ -976,7 +976,7 @@ int video_present_init(int w, int h, int prefer_ycbcr, int hdr) {
         bgra_worker_start();
         return 0;
     }
-    if (s_video >= 0) {
+    if (s_video >= 0 && !hdr) {
         /* YCbCr or other mode: soft-detach without Close; force BGRA reuse below. */
         LOGW("present: VideoOut already open (non-BGRA); soft-detach and BGRA");
         video_present_shutdown(); /* soft: no Close */
@@ -984,6 +984,13 @@ int video_present_init(int w, int h, int prefer_ycbcr, int hdr) {
             bgra_worker_start();
             return 0;
         }
+    }
+    if (s_video >= 0 && hdr) {
+        /* Port open from the menu (BGRA): must switch formats — close/reopen. */
+        LOGW("present: HDR10 requested; closing open port and re-registering");
+        (void)sceVideoOutUnregisterBuffers(s_video, 0);
+        sceVideoOutClose(s_video);
+        s_video = -1;
     }
 
     s_width = w;

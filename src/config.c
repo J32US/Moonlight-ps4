@@ -162,8 +162,12 @@ int config_load(app_config_t *cfg, const char *dir) {
             cfg->videodec2_spike = parse_bool(val);
         else if (!strcmp(key, "prefer_ycbcr"))
             cfg->prefer_ycbcr = parse_bool(val);
-        else if (!strcmp(key, "hdr"))
+        else if (!strcmp(key, "hdr")) {
             cfg->hdr = parse_bool(val);
+            /* codec key may precede hdr in the INI; supportedVideoFormats
+             * depends on both (hdr adds MAIN10). Re-apply now. */
+            config_apply_codec(cfg);
+        }
         else if (!strcmp(key, "codec")) {
             if (!strcasecmp(val, "hevc"))
                 cfg->codec = CODEC_HEVC;
