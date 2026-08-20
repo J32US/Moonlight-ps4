@@ -18,13 +18,13 @@ void config_set_defaults(app_config_t *cfg) {
     cfg->stream.width = 1920;
     cfg->stream.height = 1080;
     cfg->stream.fps = 60;
-    cfg->stream.bitrate = 20000;
+    cfg->stream.bitrate = 45000; /* 1.5.0 baseline: verified @45 Mbps */
     /* Moonlight default. Smaller payloads mean more packets/s for the same
      * bitrate and a proportionally smaller SO_RCVBUF request upstream. */
     cfg->stream.packetSize = 1392;
     cfg->stream.streamingRemotely = STREAM_CFG_LOCAL;
     cfg->stream.audioConfiguration = AUDIO_CONFIGURATION_STEREO;
-    cfg->codec = CODEC_H264;
+    cfg->codec = CODEC_HEVC; /* 1.5.0 baseline: HEVC HW decode verified */
     config_apply_codec(cfg);
     cfg->stream.encryptionFlags = ENCFLG_NONE;
     cfg->stream.colorSpace = COLORSPACE_REC_709;
@@ -43,7 +43,7 @@ void config_set_defaults(app_config_t *cfg) {
     cfg->slices_per_frame = 2;
     cfg->dec_au_onion = true;
     cfg->dec_fb_garlic = false;
-    cfg->bgra_workers = 4;
+    cfg->bgra_workers = 6; /* 1.5.0 baseline: 6 convert workers */
     cfg->bgra_nt = -1;
     snprintf(cfg->app_name, sizeof(cfg->app_name), "Steam Big Picture");
 }
