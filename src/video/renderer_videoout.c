@@ -262,33 +262,33 @@ static int register_ycbcr(int attr_w, int h, uint32_t pitch, uint32_t tiling) {
     return rc;
 }
 
-static int register_bgra(int w, int h, uint32_t pitch) {
+static int register_bgra(int w, int h, uint32_t pitch, uint32_t tiling) {
     MlVideoOutBufferAttribute attr;
     memset(&attr, 0, sizeof(attr));
     sceVideoOutSetBufferAttribute(&attr,
                                   ML_VIDEO_OUT_PIXEL_B8G8R8A8,
-                                  ML_VIDEO_OUT_TILING_LINEAR,
+                                  tiling,
                                   ML_VIDEO_OUT_ASPECT_16_9,
                                   (uint32_t)w, (uint32_t)h, pitch);
     int rc = sceVideoOutRegisterBuffers(s_video, 0, (void *const *)s_fb, s_fb_count,
                                         &attr);
-    LOGI("present: BGRA try pitch=%u %dx%d n=%d => 0x%08x",
-         pitch, w, h, s_fb_count, (unsigned)rc);
+    LOGI("present: BGRA try tile=%u pitch=%u %dx%d n=%d => 0x%08x",
+         tiling, pitch, w, h, s_fb_count, (unsigned)rc);
     return rc;
 }
 
-static int register_hdr10(int w, int h, uint32_t pitch) {
+static int register_hdr10(int w, int h, uint32_t pitch, uint32_t tiling) {
     MlVideoOutBufferAttribute attr;
     memset(&attr, 0, sizeof(attr));
     sceVideoOutSetBufferAttribute(&attr,
                                   ML_VIDEO_OUT_PIXEL_A2R10G10B10_BT2020_PQ,
-                                  ML_VIDEO_OUT_TILING_LINEAR,
+                                  tiling,
                                   ML_VIDEO_OUT_ASPECT_16_9,
                                   (uint32_t)w, (uint32_t)h, pitch);
     int rc = sceVideoOutRegisterBuffers(s_video, 0, (void *const *)s_fb, s_fb_count,
                                         &attr);
-    LOGI("present: HDR10 try pitch=%u %dx%d n=%d => 0x%08x",
-         pitch, w, h, s_fb_count, (unsigned)rc);
+    LOGI("present: HDR10 try tile=%u pitch=%u %dx%d n=%d => 0x%08x",
+         tiling, pitch, w, h, s_fb_count, (unsigned)rc);
     return rc;
 }
 
@@ -404,12 +404,17 @@ static int switch_to_bgra(int w, int h) {
         return -1;
     /* 4K kernel slot gate: n=3 -> 0x80290001; fall back n=1 (YCbCr-era
      * proven). n=1 tears (front-buffer writes) but registers. */
-    int brc = register_bgra(w, h, (uint32_t)w);
+    int brc = register_bgra(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_LINEAR);
     if (brc < 0 && s_fb_count > 1) {
         LOGW("present: BGRA n=%d => 0x%08x; retry n=1", s_fb_count, (unsigned)brc);
         if (alloc_dmem(bgra_size(w, h), 1, 1, force_wc) != 0)
             return -1;
-        brc = register_bgra(w, h, (uint32_t)w);
+        brc = register_bgra(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_LINEAR);
+    }
+    if (brc < 0) {
+        /* 4K LINEAR hits the 8192-byte-pitch cap; TILED runs in a 64KB domain. */
+        LOGW("present: BGRA LINEAR => 0x%08x; retry TILED", (unsigned)brc);
+        brc = register_bgra(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_TILE);
     }
     if (brc < 0) {
         LOGE("present: fallback BGRA RegisterBuffers 0x%08x", (unsigned)brc);
@@ -465,12 +470,16 @@ static int switch_to_hdr10(int w, int h) {
         try_ycbcr_privilege(s_video);
     if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, force_wc) != 0)
         return -1;
-    int hrc = register_hdr10(w, h, (uint32_t)w);
+    int hrc = register_hdr10(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_LINEAR);
     if (hrc < 0 && s_fb_count > 1) {
         LOGW("present: HDR10 n=%d => 0x%08x; retry n=1", s_fb_count, (unsigned)hrc);
         if (alloc_dmem(bgra_size(w, h), 1, 1, force_wc) != 0)
             return -1;
-        hrc = register_hdr10(w, h, (uint32_t)w);
+        hrc = register_hdr10(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_LINEAR);
+    }
+    if (hrc < 0) {
+        LOGW("present: HDR10 LINEAR => 0x%08x; retry TILED", (unsigned)hrc);
+        hrc = register_hdr10(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_TILE);
     }
     if (hrc < 0) {
         LOGE("present: HDR10 RegisterBuffers 0x%08x", (unsigned)hrc);
@@ -1053,12 +1062,16 @@ int video_present_init(int w, int h, int prefer_ycbcr, int hdr) {
             try_ycbcr_privilege(s_video);
         if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, force_wc) != 0)
             return -1;
-        int hrc = register_hdr10(w, h, (uint32_t)w);
+        int hrc = register_hdr10(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_LINEAR);
         if (hrc < 0 && s_fb_count > 1) {
             LOGW("present: HDR10 n=%d => 0x%08x; retry n=1", s_fb_count, (unsigned)hrc);
             if (alloc_dmem(bgra_size(w, h), 1, 1, force_wc) != 0)
                 return -1;
-            hrc = register_hdr10(w, h, (uint32_t)w);
+            hrc = register_hdr10(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_LINEAR);
+        }
+        if (hrc < 0) {
+            LOGW("present: HDR10 LINEAR => 0x%08x; retry TILED", (unsigned)hrc);
+            hrc = register_hdr10(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_TILE);
         }
         if (hrc == 0) {
             s_pitch = w * 4;
@@ -1225,7 +1238,7 @@ bgra_debug:
         return -1;
     }
     {
-        int brc = register_bgra(w, h, (uint32_t)w);
+        int brc = register_bgra(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_LINEAR);
         if (brc < 0) {
             LOGE("present: FATAL BGRA failed rc=0x%08x", (unsigned)brc);
             video_present_shutdown();
