@@ -63,18 +63,38 @@ static int load_module(const char *path) {
     return rc;
 }
 
+static int s_codec_mods[8];
+static int s_codec_mods_n;
+
 static int load_vdec_deps(void) {
-    static const char *mods[] = {
+    static const char *paths[] = {
         "/system/common/lib/libSceVdecCore.sprx",
         "/system/common/lib/libSceVdecSavc.sprx",
         "/system/common/lib/libSceVdecSavc2.sprx",
         "/system/common/lib/libSceVdecShevc.sprx", /* HEVC codec module (12.00) */
         "/system/common/lib/libSceVdecwrap.sprx",
     };
-    for (size_t i = 0; i < sizeof(mods) / sizeof(mods[0]); i++) {
-        int rc = load_module(mods[i]);
+    static const char *bare[] = {
+        "libSceVdecCore.sprx",
+        "libSceVdecSavc.sprx",
+        "libSceVdecSavc2.sprx",
+        "libSceVdecShevc.sprx",
+        "libSceVdecHevc.sprx",
+        "libSceVdecwrap.sprx",
+    };
+    for (size_t i = 0; i < sizeof(paths) / sizeof(paths[0]); i++) {
+        int rc = load_module(paths[i]);
         if (rc < 0)
-            LOGW("videodec2: opcional %s => 0x%08x", mods[i], (unsigned)rc);
+            LOGW("videodec2: opcional %s => 0x%08x", paths[i], (unsigned)rc);
+    }
+    /* Bare-name search (same path lookup that found libSceVideodec2) —
+     * the codec modules may live elsewhere on 12.00. */
+    for (size_t i = 0; i < sizeof(bare) / sizeof(bare[0]); i++) {
+        int rc = load_module(bare[i]);
+        if (rc >= 0 && s_codec_mods_n < (int)(sizeof(s_codec_mods) / sizeof(s_codec_mods[0])))
+            s_codec_mods[s_codec_mods_n++] = rc;
+        else if (rc < 0)
+            LOGW("videodec2: opcional %s => 0x%08x", bare[i], (unsigned)rc);
     }
     sceSysmoduleLoadModuleInternal(ORBIS_SYSMODULE_INTERNAL_VDECCORE);
     return 0;
@@ -672,6 +692,12 @@ int videodec2_spike_run(void) {
         if (hrc == 0 && core >= 0)
             spike_dump_module("vdeccore", core,
                               "/data/moonlight/vdeccore_blob.bin");
+    }
+    /* Dump any codec modules that loaded via bare name (SHEVC = HEVC codec). */
+    for (int i = 0; i < s_codec_mods_n; i++) {
+        char path[64];
+        snprintf(path, sizeof(path), "/data/moonlight/vdec_mod_%d.bin", i);
+        spike_dump_module("codec", (OrbisKernelModule)s_codec_mods[i], path);
     }
 
     int rc = alloc_compute_queue(&api);
