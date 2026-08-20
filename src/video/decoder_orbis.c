@@ -511,6 +511,16 @@ static void log_nal_types(const uint8_t *buf, int len) {
          types, len,
          len > 0 ? buf[0] : 0, len > 1 ? buf[1] : 0, len > 2 ? buf[2] : 0,
          len > 3 ? buf[3] : 0, len > 4 ? buf[4] : 0, len > 5 ? buf[5] : 0);
+
+    /* Hex dump the front of the first AU so HEVC VPS/SPS/PPS can be parsed
+     * offline for the bitstream-fixup analysis (INVALID_SEQUENCE 0x811d0303). */
+    int dump_n = len < 256 ? len : 256;
+    if (dump_n > 0) {
+        char hex[256 * 2 + 1];
+        for (int i = 0; i < dump_n; i++)
+            snprintf(hex + i * 2, 3, "%02x", buf[i]);
+        LOGI("orbis: primer AU hex (%d bytes): %s", dump_n, hex);
+    }
 }
 
 static int dr_setup(int videoFormat, int width, int height, int redrawRate,
