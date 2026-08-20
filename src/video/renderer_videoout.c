@@ -402,7 +402,15 @@ static int switch_to_bgra(int w, int h) {
         try_ycbcr_privilege(s_video);
     if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, force_wc) != 0)
         return -1;
+    /* 4K kernel slot gate: n=3 -> 0x80290001; fall back n=1 (YCbCr-era
+     * proven). n=1 tears (front-buffer writes) but registers. */
     int brc = register_bgra(w, h, (uint32_t)w);
+    if (brc < 0 && s_fb_count > 1) {
+        LOGW("present: BGRA n=%d => 0x%08x; retry n=1", s_fb_count, (unsigned)brc);
+        if (alloc_dmem(bgra_size(w, h), 1, 1, force_wc) != 0)
+            return -1;
+        brc = register_bgra(w, h, (uint32_t)w);
+    }
     if (brc < 0) {
         LOGE("present: fallback BGRA RegisterBuffers 0x%08x", (unsigned)brc);
         return -1;
@@ -458,6 +466,12 @@ static int switch_to_hdr10(int w, int h) {
     if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, force_wc) != 0)
         return -1;
     int hrc = register_hdr10(w, h, (uint32_t)w);
+    if (hrc < 0 && s_fb_count > 1) {
+        LOGW("present: HDR10 n=%d => 0x%08x; retry n=1", s_fb_count, (unsigned)hrc);
+        if (alloc_dmem(bgra_size(w, h), 1, 1, force_wc) != 0)
+            return -1;
+        hrc = register_hdr10(w, h, (uint32_t)w);
+    }
     if (hrc < 0) {
         LOGE("present: HDR10 RegisterBuffers 0x%08x", (unsigned)hrc);
         return -1;
@@ -1040,6 +1054,12 @@ int video_present_init(int w, int h, int prefer_ycbcr, int hdr) {
         if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, force_wc) != 0)
             return -1;
         int hrc = register_hdr10(w, h, (uint32_t)w);
+        if (hrc < 0 && s_fb_count > 1) {
+            LOGW("present: HDR10 n=%d => 0x%08x; retry n=1", s_fb_count, (unsigned)hrc);
+            if (alloc_dmem(bgra_size(w, h), 1, 1, force_wc) != 0)
+                return -1;
+            hrc = register_hdr10(w, h, (uint32_t)w);
+        }
         if (hrc == 0) {
             s_pitch = w * 4;
             s_buf_h = h;
