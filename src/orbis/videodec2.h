@@ -164,6 +164,11 @@ typedef int32_t (*sceVideodec2QueryDecoderMemoryInfo_t)(const OrbisVideodec2Deco
 typedef int32_t (*sceVideodec2CreateDecoder_t)(const OrbisVideodec2DecoderConfigInfo *,
                                                const OrbisVideodec2DecoderMemoryInfo *,
                                                OrbisVideodec2Decoder *);
+/* HEVC is a separate entry point (OpenOrbis SDK header): the generic
+ * CreateDecoder rejects codecType=2 with 0x811d0204 (CODEC_TYPE). */
+typedef int32_t (*sceVideodec2CreateHevcDecoder_t)(const OrbisVideodec2DecoderConfigInfo *,
+                                                   const OrbisVideodec2DecoderMemoryInfo *,
+                                                   OrbisVideodec2Decoder *);
 typedef int32_t (*sceVideodec2DeleteDecoder_t)(OrbisVideodec2Decoder);
 typedef int32_t (*sceVideodec2Decode_t)(OrbisVideodec2Decoder,
                                         const OrbisVideodec2InputData *,
@@ -182,6 +187,7 @@ typedef struct {
     sceVideodec2ReleaseComputeQueue_t ReleaseComputeQueue;
     sceVideodec2QueryDecoderMemoryInfo_t QueryDecoderMemoryInfo;
     sceVideodec2CreateDecoder_t CreateDecoder;
+    sceVideodec2CreateHevcDecoder_t CreateHevcDecoder; /* nullable: FW w/o HEVC */
     sceVideodec2DeleteDecoder_t DeleteDecoder;
     sceVideodec2Decode_t Decode;
     sceVideodec2Flush_t Flush;

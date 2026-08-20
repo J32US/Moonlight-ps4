@@ -66,6 +66,7 @@ static int load_vdec_deps(void) {
         "/system/common/lib/libSceVdecCore.sprx",
         "/system/common/lib/libSceVdecSavc.sprx",
         "/system/common/lib/libSceVdecSavc2.sprx",
+        "/system/common/lib/libSceVdecShevc.sprx", /* HEVC codec module (12.00) */
         "/system/common/lib/libSceVdecwrap.sprx",
     };
     for (size_t i = 0; i < sizeof(mods) / sizeof(mods[0]); i++) {
@@ -89,6 +90,10 @@ static int resolve_api(videodec2_api_t *api, int mod) {
         return -1;
     if (dlsym1(mod, "sceVideodec2CreateDecoder", (void **)&api->CreateDecoder) < 0)
         return -1;
+    if (dlsym1(mod, "sceVideodec2CreateHevcDecoder", (void **)&api->CreateHevcDecoder) < 0) {
+        LOGW("videodec2: CreateHevcDecoder no exportada — FW sin HEVC?");
+        api->CreateHevcDecoder = NULL;
+    }
     if (dlsym1(mod, "sceVideodec2DeleteDecoder", (void **)&api->DeleteDecoder) < 0)
         return -1;
     if (dlsym1(mod, "sceVideodec2Decode", (void **)&api->Decode) < 0)
@@ -203,15 +208,20 @@ static int alloc_compute_queue(videodec2_api_t *api) {
     return rc < 0 ? rc : -1;
 }
 
-/* One config probe: QueryDecoderMemoryInfo + CreateDecoder, logged with every
- * input so the console error catalog (Task 1.3) can be filled from one run. */
-static void spike_probe(const videodec2_api_t *api, const char *label,
+/* One config probe: QueryDecoderMemoryInfo + CreateDecoder/CreateHevcDecoder,
+ * logged with every input so the console error catalog can be filled from one
+ * run. via_hevc=1 routes the create through sceVideodec2CreateHevcDecoder
+ * (HEVC is a separate export — generic path rejects codecType=2). The query
+ * still runs with queryCodec (1 = AVC) because QueryDecoderMemoryInfo itself
+ * validates codecType; sizes come from resolution/DPB. */
+static void spike_probe(const videodec2_api_t *api, const char *label, int via_hevc,
+                        uint32_t queryCodec,
                         uint32_t resType, uint32_t codecType, uint32_t profile,
                         uint32_t maxLevel, int dpb, int w, int h) {
     OrbisVideodec2DecoderConfigInfo dc;
     videodec2_fill_decoder_config(&dc, api->queue, w, h);
     dc.resourceType = resType;
-    dc.codecType = codecType;
+    dc.codecType = queryCodec;
     dc.profile = profile;
     dc.maxLevel = maxLevel;
     dc.maxDpbFrameCount = dpb;
@@ -222,7 +232,7 @@ static void spike_probe(const videodec2_api_t *api, const char *label,
     int rc = api->QueryDecoderMemoryInfo(&dc, &dm);
     LOGI("spike[%s]: resType=%u codec=%u prof=%u lvl=%u dpb=%d %dx%d => 0x%08x "
          "cpu=%llu gpu=%llu cpuGpu=%llu fb=%llu",
-         label, (unsigned)resType, (unsigned)codecType, (unsigned)profile,
+         label, (unsigned)resType, (unsigned)queryCodec, (unsigned)profile,
          (unsigned)maxLevel, dpb, w, h, (unsigned)rc,
          (unsigned long long)dm.cpuMemorySize,
          (unsigned long long)dm.gpuMemorySize,
@@ -230,11 +240,47 @@ static void spike_probe(const videodec2_api_t *api, const char *label,
          (unsigned long long)dm.maxFrameBufferSize);
 
     if (rc == 0) {
-        OrbisVideodec2Decoder dec = NULL;
-        rc = api->CreateDecoder(&dc, &dm, &dec);
-        LOGI("spike[%s]: CreateDecoder => 0x%08x dec=%p", label, (unsigned)rc, dec);
-        if (dec && api->DeleteDecoder)
-            api->DeleteDecoder(dec);
+        /* Round 1 forgot the queried memories → MEMORY_POINTER. The real app
+         * allocates cpu=ONION, gpu=GARLIC, cpuGpu=ONION before create. */
+        void *cpu_m = NULL, *gpu_m = NULL, *cg_m = NULL;
+        off_t cpu_o = 0, gpu_o = 0, cg_o = 0;
+        size_t cpu_s = 0, gpu_s = 0, cg_s = 0;
+        int ok = 1;
+        if (dm.cpuMemorySize &&
+            alloc_dmem((size_t)dm.cpuMemorySize, ML_DMEM_TYPE_ONION,
+                       &cpu_m, &cpu_o, &cpu_s) < 0)
+            ok = 0;
+        if (ok && dm.gpuMemorySize &&
+            alloc_dmem((size_t)dm.gpuMemorySize, ML_DMEM_TYPE_GARLIC,
+                       &gpu_m, &gpu_o, &gpu_s) < 0)
+            ok = 0;
+        if (ok && dm.cpuGpuMemorySize &&
+            alloc_dmem((size_t)dm.cpuGpuMemorySize, ML_DMEM_TYPE_ONION,
+                       &cg_m, &cg_o, &cg_s) < 0)
+            ok = 0;
+        if (ok) {
+            dm.cpuMemory = cpu_m;
+            dm.gpuMemory = gpu_m;
+            dm.cpuGpuMemory = cg_m;
+            OrbisVideodec2Decoder dec = NULL;
+            int rc2;
+            const char *fn;
+            if (via_hevc && api->CreateHevcDecoder) {
+                fn = "CreateHevcDecoder";
+                rc2 = api->CreateHevcDecoder(&dc, &dm, &dec);
+            } else {
+                fn = "CreateDecoder";
+                rc2 = api->CreateDecoder(&dc, &dm, &dec);
+            }
+            LOGI("spike[%s]: %s => 0x%08x dec=%p", label, fn, (unsigned)rc2, dec);
+            if (dec && api->DeleteDecoder)
+                api->DeleteDecoder(dec);
+        } else {
+            LOGE("spike[%s]: alloc decoder memories FAILED", label);
+        }
+        if (cpu_m) sceKernelReleaseDirectMemory(cpu_o, cpu_s);
+        if (gpu_m) sceKernelReleaseDirectMemory(gpu_o, gpu_s);
+        if (cg_m) sceKernelReleaseDirectMemory(cg_o, cg_s);
     }
 }
 
@@ -254,39 +300,45 @@ int videodec2_spike_run(void) {
     }
 
     /* Baseline: stock AVC 1080p — must keep working. */
-    spike_probe(&api, "AVC-base", ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED,
+    spike_probe(&api, "AVC-base", 0, ORBIS_VIDEODEC2_CODEC_AVC,
+                ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED,
                 ORBIS_VIDEODEC2_CODEC_AVC, ORBIS_VIDEODEC2_PROFILE_HIGH,
                 ORBIS_VIDEODEC2_LEVEL_51, ORBIS_VIDEODEC2_DPB_DEFAULT,
                 1920, 1080);
 
-    /* Phase 1 HEVC matrix (Task 1.3 unknowns #1-#6). resourceType binary
-     * search: 1 = EMBEDDED (validated for AVC), then 2, 3 if it errors. */
-    spike_probe(&api, "HEVC-Main-res1", ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED,
-                ORBIS_VIDEODEC2_CODEC_HEVC, ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN,
-                ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51, ORBIS_VIDEODEC2_DPB_DEFAULT,
-                1920, 1080);
-    spike_probe(&api, "HEVC-Main-res2", 2u,
-                ORBIS_VIDEODEC2_CODEC_HEVC, ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN,
-                ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51, ORBIS_VIDEODEC2_DPB_DEFAULT,
-                1920, 1080);
-    spike_probe(&api, "HEVC-Main-res3", 3u,
-                ORBIS_VIDEODEC2_CODEC_HEVC, ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN,
-                ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51, ORBIS_VIDEODEC2_DPB_DEFAULT,
-                1920, 1080);
-    /* Main10 (unknown #4): 10-bit profile, resType as for Main. */
-    spike_probe(&api, "HEVC-Main10", ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED,
-                ORBIS_VIDEODEC2_CODEC_HEVC, ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN10,
-                ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51, ORBIS_VIDEODEC2_DPB_DEFAULT,
-                1920, 1080);
-    /* 4K (unknowns #5-#6): L5.1 + DPB 6, resType 1 then 2. */
-    spike_probe(&api, "HEVC-4K-res1", ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED,
-                ORBIS_VIDEODEC2_CODEC_HEVC, ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN,
-                ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51, ORBIS_VIDEODEC2_DPB_HEVC_4K,
-                3840, 2160);
-    spike_probe(&api, "HEVC-4K-res2", 2u,
-                ORBIS_VIDEODEC2_CODEC_HEVC, ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN,
-                ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51, ORBIS_VIDEODEC2_DPB_HEVC_4K,
-                3840, 2160);
+    if (!api.CreateHevcDecoder) {
+        LOGW("spike: no sceVideodec2CreateHevcDecoder — HEVC matrix SKIPPED");
+    } else {
+        /* HEVC via its own entry point. Query must carry codec=1 (query
+         * validates codecType and rejects 2); sizes derive from res/DPB.
+         * Profile/level numbering is the remaining unknown — profile=0 asks
+         * the SDK to default it (a PROFILE_LEVEL error 0x811d0205 would tell
+         * us the accepted space). */
+        spike_probe(&api, "HEVC-Main-res1", 1, ORBIS_VIDEODEC2_CODEC_AVC,
+                    ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED,
+                    ORBIS_VIDEODEC2_CODEC_HEVC, ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN,
+                    ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51, ORBIS_VIDEODEC2_DPB_DEFAULT,
+                    1920, 1080);
+        spike_probe(&api, "HEVC-Main10-res1", 1, ORBIS_VIDEODEC2_CODEC_AVC,
+                    ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED,
+                    ORBIS_VIDEODEC2_CODEC_HEVC, ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN10,
+                    ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51, ORBIS_VIDEODEC2_DPB_DEFAULT,
+                    1920, 1080);
+        spike_probe(&api, "HEVC-defaults", 1, ORBIS_VIDEODEC2_CODEC_AVC,
+                    ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED,
+                    ORBIS_VIDEODEC2_CODEC_HEVC, 0, 0, 0,
+                    1920, 1080);
+        spike_probe(&api, "HEVC-4K-res1", 1, ORBIS_VIDEODEC2_CODEC_AVC,
+                    ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED,
+                    ORBIS_VIDEODEC2_CODEC_HEVC, ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN,
+                    ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51, ORBIS_VIDEODEC2_DPB_HEVC_4K,
+                    3840, 2160);
+        spike_probe(&api, "HEVC-4K-res2", 1, ORBIS_VIDEODEC2_CODEC_AVC,
+                    2u,
+                    ORBIS_VIDEODEC2_CODEC_HEVC, ORBIS_VIDEODEC2_PROFILE_HEVC_MAIN,
+                    ORBIS_VIDEODEC2_MAX_LEVEL_HEVC_51, ORBIS_VIDEODEC2_DPB_HEVC_4K,
+                    3840, 2160);
+    }
 
     videodec2_unload(&api);
     LOGI("=== videodec2 spike DONE (see matrix above) ===");
