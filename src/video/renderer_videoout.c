@@ -401,14 +401,17 @@ static int switch_to_bgra(int w, int h) {
     int force_wc = (w >= 3840 || h >= 2160) ? 1 : 0; /* 4K slots need WC_GARLIC */
     if (w >= 3840 || h >= 2160)
         try_ycbcr_privilege(s_video);
-    if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, force_wc) != 0)
+    /* TILED (hrep4) writes w*16 B/px — 4× the linear footprint. Size the
+     * dmem for the worst case so the expand4 convert cannot overflow. */
+    size_t fb_bytes = bgra_size(w, h) * 4u;
+    if (alloc_dmem(fb_bytes, FB_COUNT_BGRA, FB_COUNT_BGRA, force_wc) != 0)
         return -1;
     /* 4K kernel slot gate: n=3 -> 0x80290001; fall back n=1 (YCbCr-era
      * proven). n=1 tears (front-buffer writes) but registers. */
     int brc = register_bgra(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_LINEAR);
     if (brc < 0 && s_fb_count > 1) {
         LOGW("present: BGRA n=%d => 0x%08x; retry n=1", s_fb_count, (unsigned)brc);
-        if (alloc_dmem(bgra_size(w, h), 1, 1, force_wc) != 0)
+        if (alloc_dmem(fb_bytes, 1, 1, force_wc) != 0)
             return -1;
         brc = register_bgra(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_LINEAR);
     }
@@ -470,12 +473,13 @@ static int switch_to_hdr10(int w, int h) {
     int force_wc = (w >= 3840 || h >= 2160) ? 1 : 0; /* 4K slots need WC_GARLIC */
     if (w >= 3840 || h >= 2160)
         try_ycbcr_privilege(s_video);
-    if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, force_wc) != 0)
+    size_t fb_bytes = bgra_size(w, h) * 4u; /* TILED expand4 = 4× linear */
+    if (alloc_dmem(fb_bytes, FB_COUNT_BGRA, FB_COUNT_BGRA, force_wc) != 0)
         return -1;
     int hrc = register_hdr10(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_LINEAR);
     if (hrc < 0 && s_fb_count > 1) {
         LOGW("present: HDR10 n=%d => 0x%08x; retry n=1", s_fb_count, (unsigned)hrc);
-        if (alloc_dmem(bgra_size(w, h), 1, 1, force_wc) != 0)
+        if (alloc_dmem(fb_bytes, 1, 1, force_wc) != 0)
             return -1;
         hrc = register_hdr10(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_LINEAR);
     }
@@ -1064,12 +1068,13 @@ int video_present_init(int w, int h, int prefer_ycbcr, int hdr) {
         int force_wc = (w >= 3840 || h >= 2160) ? 1 : 0; /* 4K slots need WC_GARLIC */
         if (w >= 3840 || h >= 2160)
             try_ycbcr_privilege(s_video);
-        if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, force_wc) != 0)
+        size_t fb_bytes = bgra_size(w, h) * 4u; /* TILED expand4 = 4× linear */
+        if (alloc_dmem(fb_bytes, FB_COUNT_BGRA, FB_COUNT_BGRA, force_wc) != 0)
             return -1;
         int hrc = register_hdr10(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_LINEAR);
         if (hrc < 0 && s_fb_count > 1) {
             LOGW("present: HDR10 n=%d => 0x%08x; retry n=1", s_fb_count, (unsigned)hrc);
-            if (alloc_dmem(bgra_size(w, h), 1, 1, force_wc) != 0)
+            if (alloc_dmem(fb_bytes, 1, 1, force_wc) != 0)
                 return -1;
             hrc = register_hdr10(w, h, (uint32_t)w, ML_VIDEO_OUT_TILING_LINEAR);
         }
