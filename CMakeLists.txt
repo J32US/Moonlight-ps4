@@ -76,6 +76,7 @@ if(PS4)
         src/video/video_stats.c
         src/video/renderer_videoout.c
         src/video/nv12_blit.c
+        src/video/hdr10_convert.c
         src/video/decoder_ffmpeg.c
         src/video/decoder_orbis.c
         src/input/input_pad.c

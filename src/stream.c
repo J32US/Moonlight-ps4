@@ -224,7 +224,8 @@ start_ok:
         int probe = video_orbis_probe(cfg->stream.width, cfg->stream.height);
         if (probe == 0) {
             video_orbis_set_tuning(cfg->dec_pipeline_depth, cfg->dec_thread_prio,
-                                   cfg->dec_au_onion, cfg->dec_fb_garlic);
+                                   cfg->dec_au_onion, cfg->dec_fb_garlic,
+                                   cfg->hdr ? 1 : 0);
             dr = video_callbacks_orbis;
             if (cfg->slices_per_frame > 0)
                 dr.capabilities = CAPABILITY_SLICES_PER_FRAME(cfg->slices_per_frame);

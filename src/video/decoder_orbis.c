@@ -58,6 +58,7 @@ static int s_tune_depth = 2;
 static int s_tune_prio = ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT;
 static int s_tune_au_onion = 1;
 static int s_tune_fb_garlic;
+static int s_tune_hdr; /* Main10 decode (profile 2) + HDR10 present */
 
 static uint8_t *s_bounce[2]; /* ping-pong: convert reads N; bounce writes N+1 */
 static size_t s_bounce_cap;
@@ -415,7 +416,7 @@ static int query_decoder_mem(int w, int h, int is_hevc,
          * full x265 AU. dpb must match query: 4 @1080p, 6 @4K. */
         dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED;
         dc.codecType = ORBIS_VIDEODEC2_CODEC_HEVC;
-        dc.profile = 1;
+        dc.profile = s_tune_hdr ? 2 : 1; /* Main10 when hdr=true */
         dc.maxLevel = (h >= 1089) ? 153 : 120;
         dc.maxDpbFrameCount = (w >= 3840) ? 6 : 4;
         dc.cpuAffinityMask = 0;
@@ -577,7 +578,7 @@ static int dr_setup(int videoFormat, int width, int height, int redrawRate,
     /* Present BEFORE CreateDecoder (validated stability) and BEFORE creating
      * the compute queue: if YCbCr hard-fails we left the queue alive and
      * suspending the app triggered CPU_FAULT_SUBMITDONE_TIMEOUT. */
-    if (video_present_init(width, height, s_prefer_ycbcr) != 0) {
+    if (video_present_init(width, height, s_prefer_ycbcr, s_tune_hdr) != 0) {
         videodec2_unload(&s_api);
         return -1;
     }
@@ -614,7 +615,7 @@ static int dr_setup(int videoFormat, int width, int height, int redrawRate,
         /* Round 23: working cell (must match query_decoder_mem exactly). */
         dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_EMBEDDED;
         dc.codecType = ORBIS_VIDEODEC2_CODEC_HEVC;
-        dc.profile = 1;
+        dc.profile = s_tune_hdr ? 2 : 1; /* Main10 when hdr=true */
         dc.maxLevel = (height >= 1089) ? 153 : 120;
         dc.maxDpbFrameCount = (width >= 3840) ? 6 : 4;
         dc.cpuAffinityMask = 0;
@@ -632,10 +633,11 @@ static int dr_setup(int videoFormat, int width, int height, int redrawRate,
     }
 
     LOGI("orbis: Videodec2 %s listo %dx%d dpb=%d hmax=%d depth=%d prio=%d "
-         "fb_n=%d au=%s blit=%s",
+         "fb_n=%d au=%s blit=%s hdr=%d",
          orbis_codec_name(is_hevc), width, height, dc.maxDpbFrameCount,
          (height + 15) & ~15, s_tune_depth, s_tune_prio, s_fb_n,
-         s_tune_au_onion ? "ONION" : "Garlic", nv12_blit_mode_name());
+         s_tune_au_onion ? "ONION" : "Garlic", nv12_blit_mode_name(),
+         s_tune_hdr);
     return DR_OK;
 }
 
@@ -874,7 +876,7 @@ static int dr_submit(PDECODE_UNIT du) {
 }
 
 void video_orbis_set_tuning(int pipeline_depth, int thread_prio,
-                            int au_onion, int fb_garlic) {
+                            int au_onion, int fb_garlic, int hdr) {
     if (pipeline_depth < 1)
         pipeline_depth = 1;
     if (pipeline_depth > ORBIS_VIDEODEC2_MAX_PIPELINE_DEPTH - 1)
@@ -883,9 +885,10 @@ void video_orbis_set_tuning(int pipeline_depth, int thread_prio,
     s_tune_prio = thread_prio > 0 ? thread_prio : ORBIS_VIDEODEC2_THREAD_PRIO_DEFAULT;
     s_tune_au_onion = au_onion ? 1 : 0;
     s_tune_fb_garlic = fb_garlic ? 1 : 0;
-    LOGI("orbis: tuning depth=%d prio=%d au=%s fb=%s",
+    s_tune_hdr = hdr ? 1 : 0;
+    LOGI("orbis: tuning depth=%d prio=%d au=%s fb=%s hdr=%d",
          s_tune_depth, s_tune_prio, s_tune_au_onion ? "ONION" : "Garlic",
-         s_tune_fb_garlic ? "WC_GARLIC" : "auto");
+         s_tune_fb_garlic ? "WC_GARLIC" : "auto", s_tune_hdr);
 }
 
 DECODER_RENDERER_CALLBACKS video_callbacks_orbis = {

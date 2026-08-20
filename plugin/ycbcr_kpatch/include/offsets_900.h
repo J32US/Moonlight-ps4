@@ -10,7 +10,7 @@
 #endif
 
 #define KSCAN_START      0x100000ull
-#define KSCAN_END        0x800000ull
+#define KSCAN_END        0xE00000ull
 #define KSCAN_PAGE       0x1000u
 #define PAIR_WINDOW      0x2000u
 

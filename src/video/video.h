@@ -17,7 +17,7 @@ int video_orbis_probe(int width, int height);
 int videodec2_spike_run(void);
 /* Videodec2 tuning; must be called before LiStartConnection (dr_setup latches it). */
 void video_orbis_set_tuning(int pipeline_depth, int thread_prio,
-                            int au_onion, int fb_garlic);
+                            int au_onion, int fb_garlic, int hdr);
 #endif
 
 typedef enum {
@@ -71,13 +71,14 @@ void video_stats_get_live(video_live_stats_t *out);
 /* workers <= 0 keeps the default. nt_pref: -1 auto (from the framebuffer
  * mapping), 0 forces cached stores, 1 forces streaming stores. */
 void video_present_set_bgra_tuning(int workers, int nt_pref);
-int video_present_init(int w, int h, int prefer_ycbcr);
+int video_present_init(int w, int h, int prefer_ycbcr, int hdr);
 void video_present_shutdown(void);
 int video_present_should_drop(void);
 /* Flip queue truly backed up (ignores the pipelined convert in flight). */
 int video_present_flip_backlogged(void);
 int video_present_plugin_loaded(void);
 int video_present_is_bgra(void);
+int video_present_is_hdr(void);
 /* Perf overlay (FPS/decode/convert/present/KB per frame + frame-time timeline)
  * drawn top-left on the streamed frame. Only supported in BGRA present mode
  * (prefer_ycbcr=false); ignored otherwise. */

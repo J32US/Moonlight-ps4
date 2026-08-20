@@ -35,6 +35,7 @@ void config_set_defaults(app_config_t *cfg) {
     cfg->prefer_hw = true;
     cfg->videodec2_spike = false;
     cfg->prefer_ycbcr = false;
+    cfg->hdr = false;
     cfg->enable_file_log = false;
     cfg->show_stats = false;
     cfg->dec_pipeline_depth = 2;
@@ -74,7 +75,9 @@ static int parse_bool(const char *v) {
 void config_apply_codec(app_config_t *cfg) {
     switch (cfg->codec) {
     case CODEC_HEVC:
-        cfg->stream.supportedVideoFormats = VIDEO_FORMAT_H265;
+        cfg->stream.supportedVideoFormats =
+            cfg->hdr ? (VIDEO_FORMAT_H265 | VIDEO_FORMAT_H265_MAIN10)
+                     : VIDEO_FORMAT_H265;
         break;
     case CODEC_AUTO:
         cfg->stream.supportedVideoFormats = VIDEO_FORMAT_H264 | VIDEO_FORMAT_H265;
@@ -159,6 +162,8 @@ int config_load(app_config_t *cfg, const char *dir) {
             cfg->videodec2_spike = parse_bool(val);
         else if (!strcmp(key, "prefer_ycbcr"))
             cfg->prefer_ycbcr = parse_bool(val);
+        else if (!strcmp(key, "hdr"))
+            cfg->hdr = parse_bool(val);
         else if (!strcmp(key, "codec")) {
             if (!strcasecmp(val, "hevc"))
                 cfg->codec = CODEC_HEVC;
@@ -211,8 +216,8 @@ int config_load(app_config_t *cfg, const char *dir) {
     LOGI("config: host=%s app=%s debug=%s %dx%d@%d br=%d pkt=%d hw=%d ycbcr=%d codec=%d fmt=0x%x file_log=%d",
          cfg->host, cfg->app_name, cfg->debug_host,
          cfg->stream.width, cfg->stream.height, cfg->stream.fps, cfg->stream.bitrate,
-         cfg->stream.packetSize, cfg->prefer_hw, cfg->prefer_ycbcr, cfg->codec,
-         cfg->stream.supportedVideoFormats,
+         cfg->stream.packetSize, cfg->prefer_hw, cfg->prefer_ycbcr, cfg->hdr,
+         cfg->codec, cfg->stream.supportedVideoFormats,
          cfg->enable_file_log);
     return 0;
 }
@@ -242,6 +247,7 @@ int config_save(const app_config_t *cfg, const char *dir) {
             "prefer_hw = %s\n"
             "videodec2_spike = %s\n"
             "prefer_ycbcr = %s\n"
+            "hdr = %s\n"
             "codec = %s\n"
             "enable_file_log = %s\n"
             "show_stats = %s\n"
@@ -260,6 +266,7 @@ int config_save(const app_config_t *cfg, const char *dir) {
             cfg->prefer_hw ? "true" : "false",
             cfg->videodec2_spike ? "true" : "false",
             cfg->prefer_ycbcr ? "true" : "false",
+            cfg->hdr ? "true" : "false",
             cfg->codec == CODEC_HEVC ? "hevc" :
                 (cfg->codec == CODEC_AUTO ? "auto" : "h264"),
             cfg->enable_file_log ? "true" : "false",

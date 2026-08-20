@@ -15,6 +15,7 @@
 #define ML_VIDEO_OUT_ASPECT_16_9        0
 #define ML_VIDEO_OUT_PIXEL_B8G8R8A8     0x80000000u
 #define ML_VIDEO_OUT_PIXEL_YCBCR420_BT709 0x08322200u
+#define ML_VIDEO_OUT_PIXEL_A2R10G10B10_BT2020_PQ 0x88740000u
 
 // Direct memory (libkernel): Videodec2 requires Onion for compute/cpuGpu; GPU fb = Garlic.
 #define ML_DMEM_ALIGN       0x4000u

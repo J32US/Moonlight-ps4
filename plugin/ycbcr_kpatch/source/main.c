@@ -279,7 +279,7 @@ int _main(struct thread *td) {
                         (unsigned long long)DUMP_OFF);
 
     mkdir("/data/moonlight", 0777);
-    int fd = open("/data/moonlight/kernel_900.bin", O_RDWR | O_CREAT, 0666);
+    int fd = open("/data/moonlight/kernel_1200.bin", O_RDWR | O_CREAT, 0666);
     if (fd < 0) {
       munmap(page, PAGE);
       printf_notification("ycbcr_kdump: open fail");

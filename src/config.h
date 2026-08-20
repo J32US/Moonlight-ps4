@@ -24,6 +24,7 @@ typedef struct {
     bool videodec2_spike;
     bool prefer_ycbcr;
     int codec; // CODEC_*: h264 (stock) / hevc / auto (advertise both)
+    bool hdr; // HDR10: advertise Main10, decode profile=2, present A2R10G10B10_BT2020_PQ
     bool enable_file_log; // writes /data/moonlight/debug.log
     bool show_stats; // on-screen perf overlay (FPS/decode/convert/present/KB per frame)
     bool paired_ok; // runtime only

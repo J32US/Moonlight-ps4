@@ -90,10 +90,10 @@ int main(void) {
     log_init(cfg.debug_host, 9999);
     LOGI("=== moonlight-ps4 %s boot ===", VERSION_STR);
     LOGN("Moonlight PS4 %s", VERSION_STR);
-    LOGI("moonlight-ps4 %s host=%s debug=%s %dx%d@%d %dkbps codec=%d fmt=0x%x",
+    LOGI("moonlight-ps4 %s host=%s debug=%s %dx%d@%d %dkbps codec=%d fmt=0x%x hdr=%d",
          VERSION_STR, cfg.host, cfg.debug_host,
          cfg.stream.width, cfg.stream.height, cfg.stream.fps, cfg.stream.bitrate,
-         cfg.codec, cfg.stream.supportedVideoFormats);
+         cfg.codec, cfg.stream.supportedVideoFormats, cfg.hdr ? 1 : 0);
 
     if (cfg.prefer_ycbcr)
         LOGN("YCbCr active");

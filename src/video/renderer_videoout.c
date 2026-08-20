@@ -1,6 +1,7 @@
 // sceVideoOut presentation: YCbCr420_BT709 / NV12 (BGRA only if prefer_ycbcr=0).
 #include "video.h"
 #include "nv12_blit.h"
+#include "hdr10_convert.h"
 #include "../log.h"
 #include "../orbis/video_out_c.h"
 #include "../ui/ui_draw.h"
@@ -32,6 +33,7 @@ static void *s_dmem_cpu_base;  /* Onion alias map (nullable) */
 static int s_width, s_height, s_pitch;
 static int s_buf_h; /* height registered in VideoOut (1080); decoder may be 1088 */
 static int s_use_bgra;
+static int s_use_hdr; /* HDR10 present: A2R10G10B10_BT2020_PQ */
 static int s_plugin_ok;
 static int s_flip_logged;
 static int s_flip_mode = ML_VIDEO_OUT_FLIP_VSYNC;
@@ -275,6 +277,21 @@ static int register_bgra(int w, int h, uint32_t pitch) {
     return rc;
 }
 
+static int register_hdr10(int w, int h, uint32_t pitch) {
+    MlVideoOutBufferAttribute attr;
+    memset(&attr, 0, sizeof(attr));
+    sceVideoOutSetBufferAttribute(&attr,
+                                  ML_VIDEO_OUT_PIXEL_A2R10G10B10_BT2020_PQ,
+                                  ML_VIDEO_OUT_TILING_LINEAR,
+                                  ML_VIDEO_OUT_ASPECT_16_9,
+                                  (uint32_t)w, (uint32_t)h, pitch);
+    int rc = sceVideoOutRegisterBuffers(s_video, 0, (void *const *)s_fb, s_fb_count,
+                                        &attr);
+    LOGI("present: HDR10 try pitch=%u %dx%d n=%d => 0x%08x",
+         pitch, w, h, s_fb_count, (unsigned)rc);
+    return rc;
+}
+
 /* OpenOrbis stub = jmp . (hang). Always Dlsym from the real SPRX. */
 static void try_ycbcr_privilege(int video_handle) {
     typedef int32_t (*ycc1_fn)(int32_t);
@@ -398,6 +415,58 @@ static int switch_to_bgra(int w, int h) {
     bgra_worker_start();
     LOGI("present_mode=BGRA (fallback) plugin=%s buf_h=%d n=%d wb=%d convert=sse2_mt",
          s_plugin_ok ? "OK" : "MISSING", s_buf_h, s_fb_count, s_present_wb);
+    return 0;
+}
+
+static int switch_to_hdr10(int w, int h) {
+    LOGW("present: switching to HDR10 (A2R10G10B10_BT2020_PQ)");
+    (void)sceVideoOutUnregisterBuffers(s_video, 0);
+    if (s_video >= 0) {
+        sceVideoOutClose(s_video);
+        s_video = -1;
+    }
+    {
+        int userId = ML_VIDEO_USER_MAIN;
+        sceUserServiceGetInitialUser(&userId);
+        s_video = sceVideoOutOpen(userId, ML_VIDEO_OUT_BUS_MAIN, 0, NULL);
+        if (s_video < 0)
+            s_video = sceVideoOutOpen(ML_VIDEO_USER_MAIN, ML_VIDEO_OUT_BUS_MAIN, 0, NULL);
+        if (s_video < 0) {
+            LOGE("present: reopen VideoOut failed 0x%08x", (unsigned)s_video);
+            return -1;
+        }
+        sceVideoOutSetFlipRate(s_video, ML_VIDEO_OUT_FLIP_60HZ);
+    }
+    if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, 0) != 0)
+        return -1;
+    int hrc = register_hdr10(w, h, (uint32_t)w);
+    if (hrc < 0) {
+        LOGE("present: HDR10 RegisterBuffers 0x%08x", (unsigned)hrc);
+        return -1;
+    }
+    s_pitch = w * 4; /* A2R10G10B10 = 4 B/px */
+    s_buf_h = h;
+    s_use_bgra = 0;
+    s_use_hdr = 1;
+    s_fb_index = 0;
+    s_last_flip_idx = -1;
+    s_flip_logged = 0;
+    s_flip_wait_logs = 0;
+    s_flip_mode = ML_VIDEO_OUT_FLIP_VSYNC;
+    s_gray_left = 0;
+    for (int i = 0; i < s_fb_count; i++)
+        memset(s_fb_cpu[i], 0, s_fb_size);
+    __asm__ volatile("sfence" ::: "memory");
+    sceGnmFlushGarlic();
+    int32_t frc = probe_submit_flip(0);
+    if (frc != 0) {
+        LOGE("present: HDR10 SubmitFlip also fails 0x%08x", (unsigned)frc);
+        return -1;
+    }
+    s_last_flip_idx = 0;
+    hdr10_convert_init(0); /* passthrough: host PQ-encoded */
+    LOGI("present_mode=HDR10 buf_h=%d n=%d wb=%d convert=avx_bt2020",
+         s_buf_h, s_fb_count, s_present_wb);
     return 0;
 }
 
@@ -629,6 +698,12 @@ static void nv12_to_bgra_rows(uint8_t *dst, int dst_pitch, int w,
     const uint8_t *yp = y + (size_t)row0 * (size_t)pitch_y;
     const uint8_t *uvp = uv + (size_t)(row0 / 2) * (size_t)pitch_uv;
     int h = row1 - row0;
+    /* AVX1 (8 px float) — fast path for the common 1:1 case; the band
+     * workers call this with row-aligned dst (pitch is 16B-multiple for
+     * the registered buffers), so the AVX store is safe. Fall back to the
+     * proven SSE2 kernel if AVX is unavailable (returns 0). */
+    if (nv12_to_bgra_avx(d, dst_pitch, yp, uvp, pitch_y, pitch_uv, w, h) == 1)
+        return;
     if ((((uintptr_t)d | (uintptr_t)(unsigned)dst_pitch) & 15u) != 0)
         nv12_to_bgra_impl(d, dst_pitch, w, h, yp, uvp, pitch_y, pitch_uv,
                           BGRA_ST_UNALIGNED);
@@ -875,13 +950,21 @@ static void pack_yuv420p_to_nv12(uint8_t *dst, int dst_pitch, int w, int h,
     }
 }
 
-int video_present_init(int w, int h, int prefer_ycbcr) {
+int video_present_init(int w, int h, int prefer_ycbcr, int hdr) {
     /*
      * NEVER call sceVideoOutClose on the hot path: with pending flips
      * (cur=-1) Close hangs → eternal black on stream exit or launch.
      * Always reuse the BGRA present if it already exists.
      */
-    if (s_video >= 0 && s_use_bgra && !prefer_ycbcr) {
+    if (s_video >= 0 && s_use_hdr && hdr) {
+        LOGI("present: reuse VideoOut HDR10 %dx%d (requested %dx%d)",
+             s_width, s_buf_h, w, h);
+        s_flip_logged = 0;
+        s_flip_wait_logs = 0;
+        s_gray_left = 0;
+        return 0;
+    }
+    if (s_video >= 0 && s_use_bgra && !prefer_ycbcr && !hdr) {
         LOGI("present: reuse VideoOut BGRA %dx%d (requested %dx%d)",
              s_width, s_buf_h, w, h);
         s_flip_logged = 0;
@@ -908,7 +991,59 @@ int video_present_init(int w, int h, int prefer_ycbcr) {
     s_pitch = w;
     s_buf_h = h;
     s_use_bgra = 0;
+    s_use_hdr = 0;
     s_plugin_ok = video_present_plugin_loaded();
+
+    /* HDR10 present: kernel-whitelisted 0x88740000 on FW 12.00, no kpayload. */
+    if (hdr && !prefer_ycbcr) {
+        LOGI("present: HDR10 requested — register A2R10G10B10_BT2020_PQ");
+        if (s_video < 0) {
+            int userId = ML_VIDEO_USER_MAIN;
+            sceUserServiceGetInitialUser(&userId);
+            s_video = sceVideoOutOpen(userId, ML_VIDEO_OUT_BUS_MAIN, 0, NULL);
+            if (s_video < 0)
+                s_video = sceVideoOutOpen(ML_VIDEO_USER_MAIN, ML_VIDEO_OUT_BUS_MAIN, 0, NULL);
+            if (s_video < 0) {
+                LOGE("present: sceVideoOutOpen failed: 0x%08x", s_video);
+                return -1;
+            }
+            sceVideoOutSetFlipRate(s_video, ML_VIDEO_OUT_FLIP_60HZ);
+        }
+        if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, 0) != 0)
+            return -1;
+        int hrc = register_hdr10(w, h, (uint32_t)w);
+        if (hrc == 0) {
+            s_pitch = w * 4;
+            s_buf_h = h;
+            s_use_hdr = 1;
+            s_fb_index = 0;
+            s_last_flip_idx = -1;
+            s_flip_logged = 0;
+            s_flip_wait_logs = 0;
+            s_flip_mode = ML_VIDEO_OUT_FLIP_VSYNC;
+            s_gray_left = 0;
+            for (int i = 0; i < s_fb_count; i++)
+                memset(s_fb_cpu[i], 0, s_fb_size);
+            __asm__ volatile("sfence" ::: "memory");
+            sceGnmFlushGarlic();
+            int32_t frc = probe_submit_flip(0);
+            if (frc != 0) {
+                LOGE("present: HDR10 SubmitFlip fails 0x%08x; fallback BGRA",
+                     (unsigned)frc);
+                (void)switch_to_bgra(w, h);
+                return 0;
+            }
+            s_last_flip_idx = 0;
+            hdr10_convert_init(0);
+            LOGI("present_mode=HDR10 buf_h=%d n=%d wb=%d convert=avx_bt2020",
+                 s_buf_h, s_fb_count, s_present_wb);
+            return 0;
+        }
+        LOGW("present: HDR10 RegisterBuffers 0x%08x; fallback BGRA", (unsigned)hrc);
+        (void)switch_to_bgra(w, h);
+        return 0;
+    }
+
 
     int userId = ML_VIDEO_USER_MAIN;
     sceUserServiceGetInitialUser(&userId);
@@ -1095,6 +1230,10 @@ void video_present_shutdown(void) {
 
 int video_present_is_bgra(void) {
     return s_use_bgra;
+}
+
+int video_present_is_hdr(void) {
+    return s_use_hdr;
 }
 
 static int pick_free_fb(int *out_shown) {
@@ -1356,7 +1495,12 @@ int video_present_frame(const uint8_t *y, const uint8_t *u, const uint8_t *v,
     } else if (fmt == VIDEO_FRAME_NV12) {
         const uint8_t *src_uv = v ? v : y + (size_t)pitch_y * (size_t)h;
         int src_uv_pitch = pitch_uv ? pitch_uv : pitch_y;
-        if (s_use_bgra) {
+        if (s_use_hdr) {
+            /* Decoder NV12 (8-bit; Main10 arrives 10-bit P010 — handled by the
+             * decoder's frameFormat detect in the future; v1 assumes 8-bit). */
+            hdr10_convert_frame_avx(dst, s_pitch, y, src_uv, pitch_y,
+                                    src_uv_pitch, w, h, 0);
+        } else if (s_use_bgra) {
             /* Scale to fill the whole registered buffer (display resolution)
              * instead of clipping to min(h, s_buf_h): otherwise streaming at
              * e.g. 720p onto a 1080p output only fills the top-left corner. */
@@ -1419,18 +1563,26 @@ int video_ui_begin(int w, int h) {
              s_width, s_buf_h, w, h);
         return 0;
     }
+    if (s_video >= 0 && s_use_hdr) {
+        LOGI("video_ui: reuse present HDR10 %dx%d (requested %dx%d)",
+             s_width, s_buf_h, w, h);
+        return 0;
+    }
     if (s_video >= 0) {
-        /* Soft-detach; if still open in BGRA, reuse. */
+        /* Soft-detach; if still open in BGRA/HDR10, reuse. */
         video_present_shutdown();
         if (s_video >= 0 && s_use_bgra) {
             bgra_worker_stop();
             return 0;
         }
+        if (s_video >= 0 && s_use_hdr) {
+            return 0;
+        }
     }
-    if (video_present_init(w, h, 0 /* BGRA */) != 0)
+    if (video_present_init(w, h, 0 /* BGRA */, 0 /* SDR */) != 0)
         return -1;
-    if (!s_use_bgra) {
-        LOGE("video_ui: did not end up in BGRA mode");
+    if (!s_use_bgra && !s_use_hdr) {
+        LOGE("video_ui: did not end up in BGRA/HDR10 mode");
         return -1;
     }
     bgra_worker_stop();

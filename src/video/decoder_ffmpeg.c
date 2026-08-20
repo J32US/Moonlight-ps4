@@ -98,7 +98,7 @@ static int dr_setup(int videoFormat, int width, int height, int redrawRate,
         return -1;
 
 #ifdef __ORBIS__
-    if (video_present_init(width, height, s_prefer_ycbcr) != 0)
+    if (video_present_init(width, height, s_prefer_ycbcr, 0) != 0)
         return -1;
 #endif
 
