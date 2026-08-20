@@ -1,19 +1,19 @@
 # SPIKE HEVC — videodec2 constants, error catalog, timing (Phase 1, Task 1.3)
 
-Status: **ROUND 1 DONE (2026-08-19, FW 12.00) — ROUND 2 in flight**
+Status: **COMPLETE — all unknowns answered on console (FW 12.00, 2026-08-20)**
 
-Round 1 findings (console):
-- Generic `sceVideodec2CreateDecoder` **rejects codecType=2** with
-  `0x811d0204` = `ORBIS_VIDEODEC2_ERROR_CODEC_TYPE` (shadPS4
-  `videodec_error.h`). resType 2/3 → `0x811d0203` RESOURCE_TYPE (resType=1
-  is correct).
-- **HEVC is a separate export: `sceVideodec2CreateHevcDecoder`** (OpenOrbis
-  SDK header — shadPS4 doesn't implement it, hence it was invisible in
-  emulator research). Round 2 routes HEVC through it; query keeps codec=1
-  (QueryDecoderMemoryInfo itself validates codecType).
-- Round-1 spike harness bug: decoder memories (cpu/gpu/cpuGpu) were never
-  allocated → AVC CreateDecoder `0x811d0105` MEMORY_POINTER. Fixed in r2
-  (alloc ONION/GARLIC/ONION like the real app).
+Final validated matrix:
+- **HEVC create path: `sceVideodec2CreateHevcDecoder`** (dedicated export; the
+  generic `CreateDecoder` rejects HEVC entirely). Also on 12.00:
+  `sceVideodec2QueryHevcDecoderMemoryInfo`, `sceVideodec2GetHevcPictureInfo`.
+- **Struct values are IDENTICAL to AVC**: codecType=1, profile=100, level=51,
+  resourceType=1. The decoder type comes from the entry point, NOT the fields.
+  Guessed 200/202/153 all → 0x811d0205 PROFILE_LEVEL.
+- Query MUST match create's maxDpbFrameCount: 4K row with query dpb=4 vs
+  create dpb=6 → 0x811d0104 MEMORY_SIZE.
+- codecType=2 anywhere → 0x811d0204 CODEC_TYPE. resType 2/3 → 0x811d0203.
+- Open: Main10 profile value (Phase 3 spike: try 102/202), output frameFormat,
+  bitstream acceptance, decode timing — the live stream test.
 
 ## How to run
 
