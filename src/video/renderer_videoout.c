@@ -328,6 +328,18 @@ static void try_ycbcr_privilege(int video_handle) {
     int32_t ycc = ((ycc1_fn)sym)(video_handle);
     LOGI("present: AddBufferYccPrivilege(handle) => 0x%08x", (unsigned)ycc);
 
+    /* 4K buffer slots are kernel-gated too: RegisterBuffers at 3840x2160
+     * returns 0x80290005 without this privilege (observed 2026-08-20 on
+     * both HDR10 0x88740000 and BGRA 0x80000000; 1080p registers fine).
+     * Same module-load + Dlsym pattern as the YCC privilege. */
+    void *sym4k = NULL;
+    if (sceKernelDlsym(mod, "sceVideoOutAddBuffer4k2kPrivilege", &sym4k) != 0 || !sym4k) {
+        LOGW("present: Dlsym AddBuffer4k2kPrivilege failed — 4K register may 0x80290005");
+        return;
+    }
+    int32_t k4 = ((ycc1_fn)sym4k)(video_handle);
+    LOGI("present: AddBuffer4k2kPrivilege(handle) => 0x%08x", (unsigned)k4);
+
     void *sys = NULL;
     if (sceKernelDlsym(mod, "sceVideoOutSysUpdatePrivilege", &sys) == 0 && sys) {
         int32_t upd = ((sys_fn)sys)(video_handle);
@@ -385,6 +397,8 @@ static int switch_to_bgra(int w, int h) {
         }
         sceVideoOutSetFlipRate(s_video, ML_VIDEO_OUT_FLIP_60HZ);
     }
+    if (w >= 3840 || h >= 2160)
+        try_ycbcr_privilege(s_video);
     if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, 0) != 0)
         return -1;
     int brc = register_bgra(w, h, (uint32_t)w);
@@ -437,6 +451,8 @@ static int switch_to_hdr10(int w, int h) {
         }
         sceVideoOutSetFlipRate(s_video, ML_VIDEO_OUT_FLIP_60HZ);
     }
+    if (w >= 3840 || h >= 2160)
+        try_ycbcr_privilege(s_video);
     if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, 0) != 0)
         return -1;
     int hrc = register_hdr10(w, h, (uint32_t)w);
@@ -1016,6 +1032,8 @@ int video_present_init(int w, int h, int prefer_ycbcr, int hdr) {
             }
             sceVideoOutSetFlipRate(s_video, ML_VIDEO_OUT_FLIP_60HZ);
         }
+        if (w >= 3840 || h >= 2160)
+            try_ycbcr_privilege(s_video);
         if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, 0) != 0)
             return -1;
         int hrc = register_hdr10(w, h, (uint32_t)w);
