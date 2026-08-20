@@ -784,82 +784,127 @@ out:
     if (cg_m) sceKernelReleaseDirectMemory(cg_o, cg_s);
 }
 
-/* Round 18 (2026-08-20): the codec-module query (core GOT [0xc61d8]) rejects
- * the first Netflix-config attempt with CONFIG_INFO (0x811d0200) at the
- * QUERY stage — the wrapper's own validation passed (no 0203/0204/0205).
- * Sweep the fields that differ from Netflix's exact construction: raw vs
- * aligned height (1080 vs 1088), dpb (-1 vs powers of 2), profile (1 vs 2).
- * Each passing query runs the full create+decode against the file AU. */
+/* Round 20 (2026-08-20): query bypass. The codec-module query gate
+ * ([0xc61d8] via core 0x46f0) rejects EVERY HEVC-routed config (0200) —
+ * 17 variants swept, all fields exonerated. The CREATE path calls different
+ * core functions and may not share the gate. Use the PROVEN AVC query sizes
+ * (identical for 1080p: cpu 30MB gpu 34MB cpuGpu 19MB fb 3.3MB), allocate
+ * them, and call CreateDecoder directly with the Netflix routing config.
+ * If create succeeds with a real handle, feed the file AU. */
 static void spike_netflix_probe(const videodec2_api_t *api, const char *label,
                                 const uint8_t *au, size_t au_len) {
-    static const struct {
-        const char *tag;
-        int height;
-        int dpb;
-        int profile;
-        int depth;      /* decodePipelineDepth */
-        int prio;       /* cpuThreadPriority */
-        int affinity;   /* cpuAffinityMask */
-        int checkmem;   /* checkMemoryType */
-        int maxlevel;   /* maxLevel */
-    } variants[] = {
-        /* r19: keep HEVC routing (0xb6c8/0xee049) but fill everything else
-         * like the WORKING AVC query row (C-100/51: depth=1 prio=700
-         * aff=0x3F checkmem=0 h=1088), then flip one field per row to find
-         * which one the codec-module query rejects. */
-        { "avcstyle",        1088, 4,  1, 1, 700, 0x3F, 0, 120 },
-        { "avcstyle-h1080",  1080, 4,  1, 1, 700, 0x3F, 0, 120 },
-        { "avcstyle-dpb-1",  1088, -1, 1, 1, 700, 0x3F, 0, 120 },
-        { "avcstyle-dpb8",   1088, 8,  1, 1, 700, 0x3F, 0, 120 },
-        { "avcstyle-depth2", 1088, 4,  1, 2, 700, 0x3F, 0, 120 },
-        { "avcstyle-prio-1", 1088, 4,  1, 1, -1,  0x3F, 0, 120 },
-        { "avcstyle-aff0",   1088, 4,  1, 1, 700, 0,    0, 120 },
-        { "avcstyle-check1", 1088, 4,  1, 1, 700, 0x3F, 1, 120 },
-        { "avcstyle-lvl123", 1088, 4,  1, 1, 700, 0x3F, 0, 123 },
-        { "avcstyle-lvl153", 1088, 4,  1, 1, 700, 0x3F, 0, 153 },
-    };
-
-    char vlabel[64];
-    for (size_t v = 0; v < sizeof(variants) / sizeof(variants[0]); v++) {
-        snprintf(vlabel, sizeof(vlabel), "%s-%s", label, variants[v].tag);
-        OrbisVideodec2DecoderConfigInfo dc;
-        videodec2_fill_decoder_config(&dc, api->queue, 1920, variants[v].height);
-        dc.maxFrameHeight = variants[v].height; /* raw, no 16-align */
-        dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_HEVC; /* 0xb6c8 */
-        dc.codecType = ORBIS_VIDEODEC2_CODEC_HEVC;            /* 0xee049 */
-        dc.profile = variants[v].profile;                     /* HEVC Main */
-        dc.maxLevel = variants[v].maxlevel;
-        dc.maxDpbFrameCount = variants[v].dpb;
-        dc.decodePipelineDepth = variants[v].depth;
-        dc.cpuAffinityMask = variants[v].affinity;
-        dc.cpuThreadPriority = variants[v].prio;
-        dc.optimizeProgressiveVideo = true;
-        dc.checkMemoryType = variants[v].checkmem ? true : false;
-
-        OrbisVideodec2DecoderMemoryInfo dm;
-        memset(&dm, 0, sizeof(dm));
-        dm.thisSize = sizeof(dm);
-        int rc = api->QueryDecoderMemoryInfo(&dc, &dm);
-        if (rc != 0) {
-            LOGI("spike[%s]: Query(res=0xb6c8 codec=0xee049 prof=%d lvl=%d "
-                 "h=%d dpb=%d depth=%d prio=%d aff=0x%x cm=%d) => 0x%08x (skip)",
-                 vlabel, variants[v].profile, variants[v].maxlevel,
-                 variants[v].height, variants[v].dpb, variants[v].depth,
-                 variants[v].prio, variants[v].affinity, variants[v].checkmem,
-                 (unsigned)rc);
-            continue;
-        }
-        LOGI("spike[%s]: QUERY OK h=%d dpb=%d prof=%d lvl=%d depth=%d "
-             "prio=%d aff=0x%x cm=%d cpu=%llu gpu=%llu cpuGpu=%llu fb=%llu",
-             vlabel, variants[v].height, variants[v].dpb, variants[v].profile,
-             variants[v].maxlevel, variants[v].depth, variants[v].prio,
-             variants[v].affinity, variants[v].checkmem,
-             (unsigned long long)dm.cpuMemorySize,
-             (unsigned long long)dm.gpuMemorySize,
-             (unsigned long long)dm.cpuGpuMemorySize,
-             (unsigned long long)dm.maxFrameBufferSize);
-        spike_netflix_run_variant(api, vlabel, &dc, &dm, au, au_len);
+    /* 1) query with AVC routing (the ONLY query config that passes) just to
+     * obtain the 1080p memory sizes */
+    OrbisVideodec2DecoderConfigInfo dc_avc;
+    videodec2_fill_decoder_config(&dc_avc, api->queue, 1920, 1080);
+    OrbisVideodec2DecoderMemoryInfo dm;
+    memset(&dm, 0, sizeof(dm));
+    dm.thisSize = sizeof(dm);
+    int rc = api->QueryDecoderMemoryInfo(&dc_avc, &dm);
+    if (rc != 0) {
+        LOGI("spike[%s]: AVC size-query => 0x%08x (skip)", label, (unsigned)rc);
+        return;
     }
+    LOGI("spike[%s]: AVC size-query OK cpu=%llu gpu=%llu cpuGpu=%llu fb=%llu",
+         label,
+         (unsigned long long)dm.cpuMemorySize,
+         (unsigned long long)dm.gpuMemorySize,
+         (unsigned long long)dm.cpuGpuMemorySize,
+         (unsigned long long)dm.maxFrameBufferSize);
+
+    /* 2) allocate the same sizes */
+    void *cpu_m = NULL, *gpu_m = NULL, *cg_m = NULL;
+    off_t cpu_o = 0, gpu_o = 0, cg_o = 0;
+    size_t cpu_s = 0, gpu_s = 0, cg_s = 0;
+    if ((dm.cpuMemorySize &&
+         alloc_dmem((size_t)dm.cpuMemorySize, ML_DMEM_TYPE_ONION,
+                    &cpu_m, &cpu_o, &cpu_s) < 0) ||
+        (dm.gpuMemorySize &&
+         alloc_dmem((size_t)dm.gpuMemorySize, ML_DMEM_TYPE_GARLIC,
+                    &gpu_m, &gpu_o, &gpu_s) < 0) ||
+        (dm.cpuGpuMemorySize &&
+         alloc_dmem((size_t)dm.cpuGpuMemorySize, ML_DMEM_TYPE_ONION,
+                    &cg_m, &cg_o, &cg_s) < 0)) {
+        LOGE("spike[%s]: alloc FAILED", label);
+        goto out;
+    }
+    dm.cpuMemory = cpu_m;
+    dm.gpuMemory = gpu_m;
+    dm.cpuGpuMemory = cg_m;
+
+    /* 3) build the Netflix HEVC routing config (query values are irrelevant
+     * now — the create path must accept them) */
+    OrbisVideodec2DecoderConfigInfo dc;
+    videodec2_fill_decoder_config(&dc, api->queue, 1920, 1080);
+    dc.maxFrameHeight = 1080; /* raw */
+    dc.resourceType = ORBIS_VIDEODEC2_RESOURCE_TYPE_HEVC; /* 0xb6c8 */
+    dc.codecType = ORBIS_VIDEODEC2_CODEC_HEVC;            /* 0xee049 */
+    dc.profile = 1;
+    dc.maxLevel = 120;
+    dc.maxDpbFrameCount = 4;
+    dc.decodePipelineDepth = 1;
+    dc.cpuAffinityMask = 0x3F;
+    dc.cpuThreadPriority = 700;
+    dc.optimizeProgressiveVideo = true;
+    dc.checkMemoryType = false;
+
+    OrbisVideodec2Decoder dec = NULL;
+    int rc2 = api->CreateDecoder(&dc, &dm, &dec);
+    if (!dec || rc2 != 0) {
+        LOGI("spike[%s]: CreateDecoder(0xb6c8/0xee049 no-query) => 0x%08x",
+             label, (unsigned)rc2);
+        goto out;
+    }
+    LOGI("spike[%s]: CreateDecoder OK handle=%p — HEVC routing, query bypassed",
+         label, (void *)dec);
+
+    /* 4) feed the file AU */
+    void *fb_m = NULL;
+    off_t fb_o = 0;
+    size_t fb_s = 0;
+    if (dm.maxFrameBufferSize &&
+        (fb_m = spike_alloc_fb2((size_t)dm.maxFrameBufferSize,
+                                &fb_o, &fb_s)) == NULL) {
+        LOGE("spike[%s]: fb alloc FAILED", label);
+        goto out;
+    }
+    OrbisVideodec2FrameBuffer fb;
+    memset(&fb, 0, sizeof(fb));
+    fb.thisSize = sizeof(fb);
+    fb.frameBuffer = fb_m;
+    fb.frameBufferSize = (uint64_t)fb_s;
+
+    OrbisVideodec2OutputInfo out;
+    memset(&out, 0, sizeof(out));
+    out.thisSize = sizeof(out);
+
+    void *au_m = NULL;
+    off_t au_o = 0;
+    size_t au_s = 0;
+    if (alloc_dmem(au_len, ML_DMEM_TYPE_ONION, &au_m, &au_o, &au_s) < 0) {
+        LOGE("spike[%s]: AU alloc FAILED", label);
+        goto out;
+    }
+    memcpy(au_m, au, au_len);
+    OrbisVideodec2InputData in;
+    memset(&in, 0, sizeof(in));
+    in.thisSize = sizeof(in);
+    in.auData = au_m;
+    in.auSize = (uint64_t)au_len;
+    in.ptsData = 0;
+    in.dtsData = 0;
+    int rc3 = api->Decode(dec, &in, &fb, &out);
+    LOGI("spike[%s]: Decode (%zuB) => 0x%08x", label, au_len, (unsigned)rc3);
+    sceKernelReleaseDirectMemory(au_o, au_s);
+
+    if (fb_m)
+        sceKernelReleaseDirectMemory(fb_o, fb_s);
+    if (api->DeleteDecoder)
+        api->DeleteDecoder(dec);
+out:
+    if (cpu_m) sceKernelReleaseDirectMemory(cpu_o, cpu_s);
+    if (gpu_m) sceKernelReleaseDirectMemory(gpu_o, gpu_s);
+    if (cg_m) sceKernelReleaseDirectMemory(cg_o, cg_s);
 }
 
 /* Round 12: structural variants + the AVC control. flags:
