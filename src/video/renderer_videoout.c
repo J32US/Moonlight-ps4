@@ -397,9 +397,10 @@ static int switch_to_bgra(int w, int h) {
         }
         sceVideoOutSetFlipRate(s_video, ML_VIDEO_OUT_FLIP_60HZ);
     }
+    int force_wc = (w >= 3840 || h >= 2160) ? 1 : 0; /* 4K slots need WC_GARLIC */
     if (w >= 3840 || h >= 2160)
         try_ycbcr_privilege(s_video);
-    if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, 0) != 0)
+    if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, force_wc) != 0)
         return -1;
     int brc = register_bgra(w, h, (uint32_t)w);
     if (brc < 0) {
@@ -451,9 +452,10 @@ static int switch_to_hdr10(int w, int h) {
         }
         sceVideoOutSetFlipRate(s_video, ML_VIDEO_OUT_FLIP_60HZ);
     }
+    int force_wc = (w >= 3840 || h >= 2160) ? 1 : 0; /* 4K slots need WC_GARLIC */
     if (w >= 3840 || h >= 2160)
         try_ycbcr_privilege(s_video);
-    if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, 0) != 0)
+    if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, force_wc) != 0)
         return -1;
     int hrc = register_hdr10(w, h, (uint32_t)w);
     if (hrc < 0) {
@@ -1032,9 +1034,10 @@ int video_present_init(int w, int h, int prefer_ycbcr, int hdr) {
             }
             sceVideoOutSetFlipRate(s_video, ML_VIDEO_OUT_FLIP_60HZ);
         }
+        int force_wc = (w >= 3840 || h >= 2160) ? 1 : 0; /* 4K slots need WC_GARLIC */
         if (w >= 3840 || h >= 2160)
             try_ycbcr_privilege(s_video);
-        if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, 0) != 0)
+        if (alloc_dmem(bgra_size(w, h), FB_COUNT_BGRA, FB_COUNT_BGRA, force_wc) != 0)
             return -1;
         int hrc = register_hdr10(w, h, (uint32_t)w);
         if (hrc == 0) {
