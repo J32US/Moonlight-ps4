@@ -4,6 +4,16 @@ Unofficial [Moonlight](https://moonlight-stream.org/) port (Sunshine/GameStream
 game-streaming client) for jailbroken PS4 (GoldHEN), built on the
 [OpenOrbis](https://github.com/OpenOrbis/OpenOrbis-PS4-Toolchain) toolchain.
 
+> ## 🙏 Big credit to the original author
+>
+> This project is a fork of **moonlight-ps4** by
+> [**Jaime Jimenez**](https://github.com/JaimeJimenezG) —
+> [JaimeJimenezG/Moonlight-ps4](https://github.com/JaimeJimenezG/Moonlight-ps4) —
+> the original Moonlight port for jailbroken PS4. Without his work
+> (pairing, streaming, UI, packaging — the whole base this fork builds on),
+> none of the HEVC/4K work here would exist. All credit for the original
+> project goes to him; this fork only adds on top of it.
+
 Full port plan: [PLAN.md](PLAN.md).
 
 **Current version: 1.5.0 "Eclipse"** — 1080p60 HEVC hardware decode baseline
