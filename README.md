@@ -48,11 +48,8 @@ at 1080p:
 
 ### TODO
 
-- [ ] Keyboard and mouse support
-- [ ] mDNS host discovery
-- [ ] Native YCbCr/NV12 presentation on `sceVideoOut`
-- [ ] 4K TILED present (DCE tile swizzle fix)
-- [ ] HDR10 at 4K (register `0x80290003`)
+- [ ] 4K TILED present — fix DCE tile swizzle (top ~128–200 px garble on `kTileModeDisplay_2dThin` frames; test-pattern diag pending)
+- [ ] HDR10 at 4K — HDR10 present register rejects with `0x80290003`
 
 Full port plan and longer backlog: [PLAN.md](PLAN.md). Validation notes:
 [docs/CONSOLE_VALIDATE.md](docs/CONSOLE_VALIDATE.md). HEVC reverse-engineering
