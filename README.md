@@ -16,8 +16,9 @@ game-streaming client) for jailbroken PS4 (GoldHEN), built on the
 
 Full port plan: [PLAN.md](PLAN.md).
 
-**Current version: 1.5.0 "Eclipse"** — 1080p60 HEVC hardware decode baseline
-(verified live on PS4 Pro, FW 12.00). See [docs/BASELINE_1.5.0.md](docs/BASELINE_1.5.0.md).
+**Current version: 1.5.0 "Eclipse-PS4PRO"** — 1080p60 HEVC hardware decode
+baseline (verified live on PS4 Pro, FW 12.00). See
+[docs/BASELINE_1.5.0.md](docs/BASELINE_1.5.0.md).
 
 ## Status
 
